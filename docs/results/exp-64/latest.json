@@ -1,0 +1,10 @@
+{
+  "ended_at": "2026-10-08T23:22:54Z",
+  "git_dirty": false,
+  "git_sha": "5daa39a61f327a2fd788ce3cc2d5372d9cb1fcd6",
+  "json": "exp-64-struct-fill.json",
+  "md": "exp-64-struct-fill.md",
+  "meter_version": "expkit/2",
+  "name": "struct-fill",
+  "unit": "EXP-64"
+}

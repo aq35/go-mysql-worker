@@ -1,0 +1,160 @@
+{
+  "unit": "EXP-64",
+  "name": "struct-fill",
+  "title": "項目を足したときの『作る場所の直し忘れ』を、コンパイラ・検査・テストのどれが止めるか",
+  "meter_version": "expkit/2",
+  "hypothesis": "1) 直接リテラル・オプション関数・引数用 struct は、項目を足してもコンパイルが通る（直し忘れ 10/10 が素通り）。 2) 必須の値を引数にした形だけは、呼ぶ側 10/10 がコンパイルエラーになる。 3) structfill 検査（宣言した型だけ見る）は、直接リテラルと引数用 struct の 10/10 を止める。    オプション関数は呼ぶ側を止められない（作る場所が関数呼び出しで、リテラルではない）。 4) 変換関数の写し忘れは、手書きのテストデータでは通り、全項目を自動で埋めたラウンドトリップで落ちる。 5) 宣言の無い型まで全部見ると、このリポジトリでも指摘が多すぎて使えない（だから宣言した型だけにする）。",
+  "started_at": "2026-10-08T23:22:37.00118345Z",
+  "ended_at": "2026-10-08T23:22:54.419698622Z",
+  "env": {
+    "captured_at": "2026-10-08T23:22:37.001241029Z",
+    "go_version": "go1.26.0",
+    "os": "linux",
+    "arch": "amd64",
+    "num_cpu": 4,
+    "gomaxprocs": 4,
+    "hostname": "vm",
+    "git_sha": "5daa39a61f327a2fd788ce3cc2d5372d9cb1fcd6",
+    "git_dirty": false
+  },
+  "workload": {
+    "change": "Schedule に PlannedQty int を足す。呼ぶ側は直さない",
+    "sites": 10
+  },
+  "injection": {},
+  "variants": [
+    {
+      "name": "作り方: literal",
+      "desc": "呼ぶ側が model.Schedule{ID: 1, PlannedAt: at} と直接書く",
+      "counters": {
+        "compile_errors": 0,
+        "lint_findings_callers": 10,
+        "lint_findings_model": 0,
+        "silent_compile_only": 10,
+        "silent_compile_plus_lint": 0,
+        "sites": 10
+      },
+      "accident": false,
+      "notes": [
+        "コンパイラだけ: 10/10 が素通り。コンパイラ＋structfill: 0/10 が素通り（model 側の指摘 0）"
+      ]
+    },
+    {
+      "name": "作り方: options",
+      "desc": "NewSchedule(id, at, opts...)。足した項目は WithPlannedQty で渡す（渡し忘れても通る）",
+      "counters": {
+        "compile_errors": 0,
+        "lint_findings_callers": 0,
+        "lint_findings_model": 1,
+        "silent_compile_only": 10,
+        "silent_compile_plus_lint": 10,
+        "sites": 10
+      },
+      "accident": true,
+      "notes": [
+        "コンパイラだけ: 10/10 が素通り。コンパイラ＋structfill: 10/10 が素通り（model 側の指摘 1）"
+      ]
+    },
+    {
+      "name": "作り方: positional",
+      "desc": "NewSchedule(id, at, qty)。足した項目は引数に足す",
+      "counters": {
+        "compile_errors": 10,
+        "lint_findings_callers": 0,
+        "lint_findings_model": 0,
+        "silent_compile_only": 0,
+        "silent_compile_plus_lint": 0,
+        "sites": 10
+      },
+      "accident": false,
+      "notes": [
+        "コンパイラだけ: 0/10 が素通り。コンパイラ＋structfill: 0/10 が素通り（model 側の指摘 0）"
+      ]
+    },
+    {
+      "name": "作り方: params",
+      "desc": "NewSchedule(ScheduleParams{...})。足した項目は Params に足す",
+      "counters": {
+        "compile_errors": 0,
+        "lint_findings_callers": 10,
+        "lint_findings_model": 0,
+        "silent_compile_only": 10,
+        "silent_compile_plus_lint": 0,
+        "sites": 10
+      },
+      "accident": false,
+      "notes": [
+        "コンパイラだけ: 10/10 が素通り。コンパイラ＋structfill: 0/10 が素通り（model 側の指摘 0）"
+      ]
+    },
+    {
+      "name": "ラウンドトリップ: 正しい変換",
+      "accident": false,
+      "notes": [
+        "手書きのテストデータ（ID・TenantID・PlannedAt だけ）: 差 [] → 通る（正しい）",
+        "FillNonZero で全項目を埋めたデータ: 差 [] → 通る（正しい）"
+      ]
+    },
+    {
+      "name": "ラウンドトリップ: PlannedQty の写し忘れ",
+      "accident": false,
+      "notes": [
+        "手書きのテストデータ（ID・TenantID・PlannedAt だけ）: 差 [] → ★通ってしまう（見逃し）",
+        "FillNonZero で全項目を埋めたデータ: 差 [PlannedQty] → 落ちる（検出）"
+      ]
+    },
+    {
+      "name": "ラウンドトリップ: PlannedAt と ActualAt の取り違え",
+      "accident": false,
+      "notes": [
+        "手書きのテストデータ（ID・TenantID・PlannedAt だけ）: 差 [] → ★通ってしまう（見逃し）",
+        "FillNonZero で全項目を埋めたデータ: 差 [PlannedAt] → 落ちる（検出）"
+      ]
+    },
+    {
+      "name": "ラウンドトリップのまとめ",
+      "counters": {
+        "broken_mappers": 2,
+        "missed_by_fillnonzero": 0,
+        "missed_by_hand_data": 2
+      },
+      "accident": false
+    },
+    {
+      "name": "このリポジトリ: 宣言なしで全部の型を見た（-structfill.all）",
+      "counters": {
+        "distinct_types": 71,
+        "findings": 165
+      },
+      "accident": true,
+      "notes": [
+        "指摘の多い型: FieldContext=25, Op=22, Analyzer=8, LatencyStats=7, Record=6, Row=4, Lever=4, Options=4"
+      ]
+    },
+    {
+      "name": "このリポジトリ: 宣言した型だけを見た（既定）",
+      "counters": {
+        "findings": 0
+      },
+      "accident": false,
+      "notes": [
+        "宣言しているのは internal/structfilllab の Schedule / ScheduleRow だけ。事故側の再現コードは理由つきの逃げ道"
+      ]
+    }
+  ],
+  "verdict": "項目を足しても、直接リテラル・オプション関数・引数用 struct はコンパイルが通り、作る場所の直し忘れは素通りする。コンパイラが止めるのは『必須の値を引数にした形』だけ。リテラルは structfill 検査（宣言した型だけ）で止まり、変換関数の写し忘れは全項目を自動で埋めたラウンドトリップテストで止まる（手書きのテストデータでは通る）。オプション関数は任意の項目専用にする。全部の型を見ると騒がしすぎるので、守りたい型にだけ宣言を付ける。",
+  "scope": [
+    "Go の構造体リテラルとコンストラクタ。ORM が反射で埋める型（GORM の Create など）は対象外",
+    "検査は『リテラルで作る場所』だけを見る。作った後の代入（s.X = ...）は見ない"
+  ],
+  "uncertainty": [
+    "合成コードで数えた。実際のコードは作り方が混ざるので、素通りの数は混ざり具合で変わる",
+    "引数が多い（6個以上）ときの順番の取り違えは、型が同じだとコンパイラも検査も止めない。Plan/Actual のように型を分けるか、引数用 struct＋検査にする"
+  ],
+  "artifacts": [
+    "internal/lint/structfill.go: //smlint:structfill を付けた型の項目漏れを見る検査（sqllint に同梱）",
+    "internal/structfilllab/fill.go: FillNonZero / DiffFields（reflect だけ。他プロジェクトへそのまま持って行ける）",
+    "docs/struct-fill.md: 判断の表と導入の順番"
+  ],
+  "next": null
+}

@@ -88,6 +88,7 @@ go test ./internal/repo/       -run TestEXP6 -v   # マイグレーション途�
 | `internal/tenantcache/` `secretcache/` | テナント隔離メモリ／期限つき秘密（singleflight） | [secrets.md](docs/secrets.md) |
 | `internal/poolbudget/` | 接続予算（コンテナ×プール ≤ 上限）と起動時ガード | [pool-saturation.md](docs/pool-saturation.md) |
 | `internal/tenantworker/` | 統合ワーカー（lease×fanout×backoff×fence×独立観測） | [web-worker-split.md](docs/web-worker-split.md) |
+| `internal/structfilllab/` | 構造体のセット漏れ（作り方4種の比較・`FillNonZero` でラウンドトリップ） | [struct-fill.md](docs/struct-fill.md) |
 | `internal/appx/` | app 層の小物（Ternary 等・samber/lo 基盤） | [samber-io.md](docs/samber-io.md) |
 | `cmd/worker/` | 状態同期のデモ。途中で事故を起こす。接続予算ガード付き | — |
 | `cmd/dispatcher/` | 統合ワーカーを単体で動かす（命令の配信） | [web-worker-split.md](docs/web-worker-split.md) |

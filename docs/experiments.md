@@ -173,6 +173,7 @@ files, _ := r.Save("...")
 | EXP-61 | 月予算での縦/横/Aurora の優先順位（律速→lever の判断モデル） | 済（[docs/cost-scaling-priority.md](cost-scaling-priority.md)） |
 | EXP-62 | イベント駆動 worker（doorbell＋floor・完了は DB CAS・crash は reconcile） | 済（[docs/event-driven-worker.md](event-driven-worker.md)） |
 | EXP-63 | テナント割り当てを DB lease で（均等10/10・失敗時 survivor が全20・二重所有0・fence 単調・静的ピンは orphan10） | 済（[docs/tenant-assignment.md](tenant-assignment.md)） |
+| EXP-64 | 構造体のセット漏れ（直接リテラル/オプション関数/引数用 struct は 10/10 素通り・引数だけコンパイラが止める・structfill 検査・ラウンドトリップ） | 済（[docs/struct-fill.md](struct-fill.md)） |
 
 ## 設計の早見表・原則
 
