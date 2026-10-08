@@ -38,6 +38,8 @@ func TestAnalyzers_想定どおり検出する(t *testing.T) {
 		{lint.LoopQuery, "loopquery/data"},
 		{lint.TxExternalCall, "txhttp/data"},
 		{lint.LayerImport, "layerimport/repo"},
+		{lint.StructFill, "structfill/model"},
+		{lint.StructFill, "structfill/app"},
 	}
 	for _, c := range cases {
 		t.Run(c.a.Name, func(t *testing.T) {
@@ -239,6 +241,8 @@ func ruleOf(msg string) string {
 		return "loopquery"
 	case strings.Contains(msg, "time.Now()"):
 		return "domaintime"
+	case strings.Contains(msg, "項目が埋まっていない"):
+		return "structfill"
 	}
 	return "other"
 }

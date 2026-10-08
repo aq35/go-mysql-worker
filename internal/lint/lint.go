@@ -20,7 +20,7 @@ import (
 // Analyzers はこのパッケージが提供する検査。
 func Analyzers() []*analysis.Analyzer {
 	return []*analysis.Analyzer{
-		RawDB, TxExternalCall, RowsAffected, MissingContext, LoopQuery, DomainTime, LayerImport,
+		RawDB, TxExternalCall, RowsAffected, MissingContext, LoopQuery, DomainTime, LayerImport, StructFill,
 	}
 }
 
