@@ -178,6 +178,8 @@ if [[ -n "${MYSQL_DSN:-}" ]]; then
       go test ./internal/doorbelllab/ -run TestEXP62 -v -timeout 20m
   run "78-exp63-tenant-assignment-${stamp}.txt" "(78) EXP-63 テナント割り当て lease（均等・失敗時全責任・fence 単調）" \
       go test ./internal/assignlab/ -run TestEXP63 -v -timeout 20m
+  run "79-exp64-subscription-cache-guard-${stamp}.txt" "(79) EXP-64 サブスクリプションのキャッシュ化でガードが外れる" \
+      go test ./internal/subguardlab/ -run TestEXP64 -v -timeout 20m
 fi
 
 # ---- MySQL が無くても走る（追加ぶん・可観測性/容量計算/サブスク配線）----

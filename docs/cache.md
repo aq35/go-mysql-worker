@@ -44,6 +44,12 @@
 - 書き込みの無効化は、同プロセスなら簡単（メモリのフラグ）。プロセスを跨ぐなら pub/sub で
   無効化イベントを配る（[EXP-43](sse-fan-in.md) と同じ経路）。
 
+## テナント境界（EXP-64）
+
+キャッシュは `repo.Scope` のガードの外にある。キーにテナントが無い・読み込みを `Unscoped` で全テナント1本にすると、
+ID 衝突と ID 総当たりで他テナントの行を返す。キーは `(tenant, id)`、テナントは ctx から
+（[subscription-cache-guard](subscription-cache-guard.md)・[internal/tenantcache](../internal/tenantcache)）。
+
 ## 保証しない範囲・未検証
 
 - 実際の stale 許容はデータ次第。本実験は「DB 読み回数」と「stale を返した回数」の trade-off を

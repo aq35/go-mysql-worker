@@ -173,6 +173,7 @@ files, _ := r.Save("...")
 | EXP-61 | 月予算での縦/横/Aurora の優先順位（律速→lever の判断モデル） | 済（[docs/cost-scaling-priority.md](cost-scaling-priority.md)） |
 | EXP-62 | イベント駆動 worker（doorbell＋floor・完了は DB CAS・crash は reconcile） | 済（[docs/event-driven-worker.md](event-driven-worker.md)） |
 | EXP-63 | テナント割り当てを DB lease で（均等10/10・失敗時 survivor が全20・二重所有0・fence 単調・静的ピンは orphan10） | 済（[docs/tenant-assignment.md](tenant-assignment.md)） |
+| EXP-64 | サブスクリプションをキャッシュ化したらリポジトリ層のガードが外れた（Unscoped＋map[id] で配信の 43% が他テナント・エラー0／テナントごと Scope＋2段キーで漏れ0・問い合わせ40） | 済（[docs/subscription-cache-guard.md](subscription-cache-guard.md)） |
 
 ## 設計の早見表・原則
 
@@ -201,6 +202,7 @@ files, _ := r.Save("...")
 | [docs/worker-connection-model.md](worker-connection-model.md) | 常時接続ワーカー（WS多重化・再接続・1コンテナ1接続の是非・outbox） |
 | [docs/domain-themes.md](domain-themes.md) | 適用テーマ候補と具体テーブル設計（マルチテナント越境禁止のDDL雛形） |
 | [docs/subscription-design.md](subscription-design.md) | hub の破棄粒度・途中失権・状態×タスクの購読設計 |
+| [docs/subscription-cache-guard.md](subscription-cache-guard.md) | バグシナリオ: サブスクリプションをキャッシュ化したらリポジトリ層のテナントガードが外れた（EXP-64） |
 
 ## 実行時ガード
 
