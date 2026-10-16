@@ -27,6 +27,9 @@
 1命令に複数回の観測（出した直後 `unknown` → 後で `success`）がありうるので
 `PRIMARY KEY (tenant_id, command_id, observed_at)` の追記型。
 
+実績が予定ではなく**命令**を参照する理由（予定は UPDATE される・周期予定は1行から何回も走る）、名前のスナップショットを
+持たせるか・いつ入れるかは [plan-actual-reference](plan-actual-reference.md)。
+
 ## ワーカーはどれくらいの頻度で引くか（実測）
 
 命令 600 件を 3 秒に散らし（到着 200/s）、ポーリング間隔を振った。

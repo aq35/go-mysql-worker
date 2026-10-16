@@ -29,6 +29,7 @@ Go + MySQL の常時稼働アプリ（Worker / Web API）を**作るとき・レ
 | SELECT に LIMIT を必須化 | 暴走スキャンを止める | `sqllint`（LIMIT 無し SELECT を検出） | [repository-layer](repository-layer.md) |
 | 太いメモ列は別表 or off-page（一覧の舐めから外す） | inline の太い列は全体走査が10倍重い | 一覧クエリが太い列を読んでいないか | [table-split](table-split.md) / [column-projection](column-projection.md) |
 | charset は列ごとに選ぶ（ASCII 列に utf8mb4 を乱用しない） | utf8mb4 は4B/字で index 長 3072B に当たる | 長い索引列のバイト長。長いなら prefix 索引 | [charset](charset.md) |
+| 実績は「変わらない行」を `(tenant_id, id)` で参照する（予定ではなく命令へ。必要なら実行時点の名前を `*_at_run` で持つ） | 予定は UPDATE されるので、ID だけだと過去の実績の意味が変わる。当時の名前は後から取り戻せない | 実績→予定の JOIN で過去を表示していないか。参照先を DELETE していないか | [plan-actual-reference](plan-actual-reference.md) |
 | マイグレーションは expand/contract（前方後方互換） | 途中クラッシュ・無停止デプロイに耐える | 途中状態でも旧新コードが動くか | [zero-downtime-migration](zero-downtime-migration.md) / [migration-crash](migration-crash.md) |
 
 ## C. クエリ・性能
