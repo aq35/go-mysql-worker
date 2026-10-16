@@ -1,0 +1,10 @@
+{
+  "ended_at": "2026-10-16T09:11:42Z",
+  "git_dirty": true,
+  "git_sha": "87bc59ae9d148232f96fb8c4005de80ebfa058df",
+  "json": "exp-64-subscription-cache-guard-bypass.json",
+  "md": "exp-64-subscription-cache-guard-bypass.md",
+  "meter_version": "expkit/2",
+  "name": "subscription-cache-guard-bypass",
+  "unit": "EXP-64"
+}

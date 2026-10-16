@@ -81,6 +81,7 @@ Go + MySQL の常時稼働アプリ（Worker / Web API）を**作るとき・レ
 | やること | なぜ | どう確認 | 根拠 |
 | --- | --- | --- | --- |
 | 全クエリがテナント境界を越えない（`repo.Scope` で強制） | 越境は即・情報漏洩（境界1本外すと全越境・[EXP-58](tenant-scope.md)） | テナントは ctx から？入力から取っていないか | [tenant-scope](tenant-scope.md) / [security-layers](security-layers.md) |
+| キャッシュ／サブスクリプションの経路もテナント境界を越えない | 読み出しが DB を通らないので `repo.Scope` のガードが走らない。Unscoped＋`map[id]` で配信の 43% が他テナント・エラー0（[EXP-64](subscription-cache-guard.md)） | キーが `(tenant, id)` か。poller が Unscoped を使っていないか。`Get` が ctx のテナントを取るか | [subscription-cache-guard](subscription-cache-guard.md) |
 | テナントは ctx から取得（クライアント入力を信じない） | なりすまし防止 | ハンドラが tenant を引数で受けていないか | [security-layers](security-layers.md) |
 | フィールド単位の認可（@auth） | 見せてよい列はロールで違う | 制限列が誰でも見えていないか | [security-layers](security-layers.md) |
 | 行レベル認可（この対象を操作してよいか） | 自テナント内でも権限は分かれる | canOperate/grant を通すか | [security-layers](security-layers.md) |
