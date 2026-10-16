@@ -202,6 +202,7 @@ files, _ := r.Save("...")
 | [docs/worker-connection-model.md](worker-connection-model.md) | 常時接続ワーカー（WS多重化・再接続・1コンテナ1接続の是非・outbox） |
 | [docs/domain-themes.md](domain-themes.md) | 適用テーマ候補と具体テーブル設計（マルチテナント越境禁止のDDL雛形） |
 | [docs/subscription-design.md](subscription-design.md) | hub の破棄粒度・途中失権・状態×タスクの購読設計 |
+| [docs/plan-actual-reference.md](plan-actual-reference.md) | 予定と実績の分離: ID 参照は命令へ・名前は実行時点のスナップショット（`*_at_run`）・後から足すなら NULL＝不明 |
 | [docs/subscription-cache-guard.md](subscription-cache-guard.md) | バグシナリオ: サブスクリプションをキャッシュ化したらリポジトリ層のテナントガードが外れた（EXP-64） |
 
 ## 実行時ガード
