@@ -13,6 +13,30 @@
 - 負荷側のスケジュール遅れを必ず記録する方針は変えない（言語を問わず、負荷側の詰まりを見つけるため）。
 - 「軽い」という利点は、**この環境では未測定**。M3 で負荷側の CPU を実測し、設計書の前提（負荷側は DB より十分軽い）が成り立つかを確かめる。
 
+## 対応エンジン（MySQL と PostgreSQL の両方）
+
+同じワークロード定義を、**エンジンを切り替えて試算・実行・比較できる**ようにする。EXP-65 の実測は PostgreSQL、運用先は MySQL なので、
+両方で測れること自体に価値がある（同じ定義で「エンジンによる差」が見える）。
+
+エンジンの違いは `Engine` トレイトに閉じ込める:
+
+| 差分 | MySQL | PostgreSQL | `Engine` が吸収すること |
+| --- | --- | --- | --- |
+| 接続 | 接続ごとにスレッド | 接続ごとにプロセス（アイドル接続のコストが重い） | アイドル接続のコストは**エンジンごとに別測定**（相互に流用しない） |
+| 状態の採取 | `SHOW GLOBAL STATUS`（`Threads_connected` / `Threads_running`）、`performance_schema` | `pg_stat_activity`、`pg_stat_database`、`pg_stat_statements`（拡張が必要） | `snapshot()` が共通の項目（接続数・実行中数・読み取り行数）に正規化 |
+| クエリ別の CPU | `performance_schema` の `SUM_CPU_TIME`（8.0.28+、要検証） | `pg_stat_statements` は実行時間のみで **CPU 時間は無い** | クエリ別 CPU は MySQL のみ。PostgreSQL は**校正（単体実行の cgroup 差分）**で出す |
+| DB 全体の CPU | cgroup / docker / CloudWatch | 同左（EXP-65 で cgroup を使用済み） | `cpusrc` は共通 |
+| プレースホルダ | `?` | `$1` | 定義は `:name` で書き、`Engine` が変換 |
+| DDL・型・関数 | `AUTO_INCREMENT`、`DATETIME` など | `SERIAL` / `IDENTITY`、`TIMESTAMPTZ` など | クエリ・DDL は**エンジンごとに上書き可能**（`sql: {"mysql": …, "postgres": …}`）。共通の SQL で動く間は 1 つで足りる |
+| 実行計画 | `EXPLAIN ANALYZE`（8.0.18+） | `EXPLAIN (ANALYZE, BUFFERS)` | 計画の文字列を保存し、読み取り行数だけ共通項目に抜く |
+| 送信方式 | テキスト / プリペアド | simple / extended | `protocol: text | prepared` を定義に持つ（本物のアプリに合わせる） |
+| プロキシ | RDS Proxy（ピン留めの規則はエンジンで異なる） | 同左 | 接続モデルに `proxy` を持つが、ピン留めの規則は**エンジンごとに別途確認** |
+
+- ドライバは `mysql_async` と `tokio-postgres` を `Engine` の後ろに置く（`sqlx` の `Any` は機能が限られるため使わない）。
+- プロファイルに `engine` を持たせる（`{"name": "pg-2vcpu", "engine": "postgres", "vcpu": 2, …}`）。校正表・膝の位置は**プロファイル（エンジン × vCPU）ごと**。
+- 比較画面は「同じワークロード × エンジン違い」を並べられるようにする。スキーマはエンジンごとの DDL が要るので、最初は共通の簡単な型だけで始める。
+- **M0 の確認はこの環境の PostgreSQL 16 でできる**（MySQL は無い）。MySQL 側の確認はユーザーの環境で行う。
+
 ## 目的と、やらないこと
 
 | やる | やらない |
@@ -20,7 +44,7 @@
 | 登録したワークロードの CPU 使用率・接続数の試算 | 本番 DB への接続（ガードで拒否） |
 | 同じ定義の実行（負荷生成・計測） | 本番の SQL の自動収集（まず手で登録。収集は後段） |
 | 試算と実測の差の表示（試算の信用度を知る） | DDL / DML の自動最適化提案 |
-| テナント数の掃引と、限界点（膝）の自動探索 | MySQL 以外（PostgreSQL は後で `Driver` を足す） |
+| テナント数の掃引と、限界点（膝）の自動探索 | MySQL / PostgreSQL 以外のエンジン（Aurora など MySQL / PostgreSQL 互換は同じ `Engine` で扱う） |
 
 ## EXP-65 から設計に入れた教訓
 
@@ -59,8 +83,8 @@
 {
   "name": "site-monitor",
   "profiles": [                       // DB スペックの候補。画面で切り替え・並べて比較できる
-    {"name": "2vcpu", "vcpu": 2, "memory_gb": 8,  "max_connections": 200, "dsn_env": "CAPLAB_DSN_2"},
-    {"name": "4vcpu", "vcpu": 4, "memory_gb": 16, "max_connections": 400, "dsn_env": "CAPLAB_DSN_4"}
+    {"name": "2vcpu", "engine": "mysql", "vcpu": 2, "memory_gb": 8,  "max_connections": 200, "dsn_env": "CAPLAB_DSN_2"},
+    {"name": "4vcpu", "engine": "mysql", "vcpu": 4, "memory_gb": 16, "max_connections": 400, "dsn_env": "CAPLAB_DSN_4"}
   ],
   "active_profile": "2vcpu",
   "tenants": {"count": 300, "boundary_column": "tenant_id"},
@@ -236,7 +260,8 @@ GET      /api/runs, /api/runs/{id}       履歴・結果
 
 ## 未確認・要判断
 
-- **MySQL をこの環境で動かせていない**（docker も mysqld も無い）。EXP-65 の実測はすべて PostgreSQL。MySQL での CPU/回、`CPU_TIME` 列の有無、cgroup での採取は**実装時に最初に確認する**。
+- **MySQL をこの環境で動かせていない**（docker も mysqld も無い）。EXP-65 の実測はすべて PostgreSQL。MySQL での CPU/回、`CPU_TIME` 列の有無、cgroup での採取は**ユーザーの環境で最初に確認する**。PostgreSQL 側の確認はこの環境でできる。
+- Datadog で見た「接続数 100 超」が、アプリ→Proxy か Proxy→DB か**は未確認**（ユーザーが確認する）。接続の実験の優先順位が変わる。
 - 実行先 MySQL をどこで動かすか（ローカルの docker compose を想定。RDS を直接測る場合は CPU の採取方法が変わる）。
 - 試算が実測から外れる要因（ロック競合・バッファプールのヒット率・データ分布の偏り）は、線形モデルでは表せない。**差が大きいときは「試算を信用しない」ことを画面が示す**設計にする。
 - 認証の実クエリ・Web の実クエリは、ユーザーが登録するまで仮のものしか無い。
