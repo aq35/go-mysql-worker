@@ -3,6 +3,16 @@
 テーブル定義・クエリ・頻度を登録すると、**MySQL の CPU 負担と接続数を試算**し、同じ定義で**実際に負荷をかけて測り、試算と突き合わせる**アプリ。
 きっかけは [tenant-cpu-isolation](tenant-cpu-isolation.md)（EXP-65）。あそこで手作業だった「ワーカー・Web・認証を混ぜた上限の見積り」をアプリにする。
 
+## 言語の選択（Rust）
+
+- 決め手: 負荷生成を軽く保てる（GC が無い・メモリが小さい）こと、ゴールが固まっていて仕様の変更が少ないこと、型で定義の誤りを実行前に落とせること。
+- **Go の資産の扱い**: `internal/expkit` は Go のため、必要な部分を Rust に移植する。
+  - `Latency`（分位点）→ `hdrhistogram`。`Env`（測定条件の採取）→ 移植（Rust の版・OS・CPU・MySQL 変数・git SHA）。`Recorder`（JSON + Markdown 保存）→ 移植。
+  - `internal/lint`（テナント条件の検査）→ `sqlparser` で書き直す。Go 側の `cmd/sqllint` と**同じテストケース**を共有して、判定が一致することを確かめる。
+  - `Sampler`（接続プール・メモリの時系列）は、Rust 側では MySQL の `SHOW GLOBAL STATUS` とプロセスのメモリ採取で作り直す。
+- 負荷側のスケジュール遅れを必ず記録する方針は変えない（言語を問わず、負荷側の詰まりを見つけるため）。
+- 「軽い」という利点は、**この環境では未測定**。M3 で負荷側の CPU を実測し、設計書の前提（負荷側は DB より十分軽い）が成り立つかを確かめる。
+
 ## 目的と、やらないこと
 
 | やる | やらない |
@@ -23,7 +33,7 @@
 ## 構成
 
 ```
-ブラウザ (SPA)  ──JSON──  cmd/caplab (Go, 単一バイナリ, 静的ファイル埋め込み)
+ブラウザ (SPA)  ──JSON──  caplab (Rust, 単一バイナリ, 静的ファイル埋め込み)
                            ├─ model      プロジェクト定義（スキーマ・クエリ・アクター）
                            ├─ schema     DDL 取り込み・データ生成
                            ├─ calib      クエリ単体の校正（CPU/回 × 同時数）
@@ -38,8 +48,9 @@
                        実験用 MySQL（ラボ専用。例: docker compose の mysql:8.0 に --cpus=2）
 ```
 
-- 言語は Go。既存の `internal/expkit`（`Latency`・`Sampler`・`Env`・`Recorder`）と `internal/lint`（テナント条件の検査）を再利用する。
-- 新規パッケージは `internal/caplab/…`、エントリは `cmd/caplab`。フロントは素の HTML + 小さな JS（ビルド不要）にして `embed` で同梱する。
+- **言語は Rust**（理由は下の「言語の選択」）。リポジトリ内の置き場は `caplab/`（独立した Cargo ワークスペース。Go のモジュールとは混ぜない）。
+- 主な crate（案）: `tokio`（非同期・タイマー）、`axum`（API と SSE）、`mysql_async`（MySQL。`sqlx` でもよい）、`serde` / `serde_json`、`rust-embed`（静的ファイル同梱）、`sqlparser`（SQL の解析）、`hdrhistogram`（遅延の分位点）、`clap`。
+- 下のパッケージ名（`model`・`estimate` など）は、Rust ではモジュール名（`src/model.rs` …）に読み替える。
 - 定義は **1 プロジェクト = 1 つの JSON ファイル**（git に入れられる）。実行結果は `runs/<時刻>/` に JSON + Markdown で保存する。DB は持たない。
 
 ## データモデル（プロジェクト JSON）
@@ -216,6 +227,7 @@ GET      /api/runs, /api/runs/{id}       履歴・結果
 
 | 段階 | 内容 | 検証できること |
 | --- | --- | --- |
+| M0 | Rust の雛形（Cargo ワークスペース、axum、設定、CI）+ **MySQL スパイク**: 接続、`SHOW GLOBAL STATUS`、`performance_schema` の `CPU_TIME` の有無、cgroup の CPU 採取を 1 本の小さなバイナリで確認する | 未確認の MySQL 周りの前提を最初に潰す |
 | M1 | `model`（`profiles` を含む）+ `estimate`（DB なし）+ 試算 API + 画面 3・4 | 手入力した校正値から試算が出る。EXP-65 の再現。vCPU の切り替えで結果が変わる |
 | M2 | `schema` + データ生成 + `calib` + 画面 1・2 | クエリの CPU/回の校正表 |
 | M3 | `runner`（steady）+ `cpusrc(cgroup)` + `dbstat` | 試算と実測の突き合わせ（画面 5・6） |
