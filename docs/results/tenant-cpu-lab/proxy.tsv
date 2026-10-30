@@ -1,0 +1,7 @@
+case	via	app_clients	proxy_clients_seen	proxy_sv_active	proxy_cl_waiting	proxy_sv_total	db_conns	db_active	qps	p95	p99	db_cpu%
+直結 100	direct	100	100	0	0	0	101	1	490	1.28	3.65	27
+Proxy(txn,pool10) 100	bouncer	100	101	3	0	8	9	1	499	1.21	3.17	19
+Proxy(txn,pool10) 400	bouncer	400	401	1	0	10	11	0	503	1.27	7.51	20
+Proxy(txn,pool10) 100 + tx内50ms待ち	bouncer	100	101	10	90	10	11	0	199	7211.50	7533.43	10
+Proxy(txn,pool40) 100 + tx内50ms待ち	bouncer	100	101	33	0	40	41	1	497	52.89	77.54	29
+Proxy(session=全部ピン留め相当) 100	bouncer	100	101	100	0	100	101	1	496	1.59	99.43	25

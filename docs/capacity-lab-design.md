@@ -37,6 +37,22 @@
 - 比較画面は「同じワークロード × エンジン違い」を並べられるようにする。スキーマはエンジンごとの DDL が要るので、最初は共通の簡単な型だけで始める。
 - **M0 の確認はこの環境の PostgreSQL 16 でできる**（MySQL は無い）。MySQL 側の確認はユーザーの環境で行う。
 
+## 接続の 3 層の観察（アプリ → Proxy → DB）
+
+接続数を 1 つの数字で扱わず、**3 層に分けて同時に採取・表示**する。実測の例は [proxy-connection-layers](proxy-connection-layers.md)。
+
+| 層 | 意味 | 取得（`ProxyObserver`） |
+| --- | --- | --- |
+| ① アプリ → Proxy | アプリのプールが張る接続（コンテナ数 × プール上限が上限） | PgBouncer `SHOW LISTS` / ProxySQL `stats_mysql_global` / CloudWatch `ClientConnections` |
+| ② Proxy → DB | 実際に DB へ張られた接続。待たされているクライアントの数も見る | PgBouncer `SHOW POOLS` / ProxySQL `stats_mysql_connection_pool` / CloudWatch `DatabaseConnections` など |
+| ③ DB 側 | DB から見た接続数と、実行中の数 | `pg_stat_activity` / `SHOW GLOBAL STATUS`（`Threads_connected`・`Threads_running`） |
+
+- プロファイルに `proxy: {kind: "none" | "pgbouncer" | "proxysql" | "rds_proxy", pool_mode, pool_size, …}` を持たせる。
+  ローカルは PgBouncer（PostgreSQL）と ProxySQL（MySQL）が RDS Proxy の代用品。**ピン留めの規則は RDS Proxy と異なる**旨を画面に常に出す。
+- 試算の接続モデルは `DB 実接続 ≈ min(プール上限, 同時に必要な接続数)`、同時に必要な接続数 = `トランザクション/秒 × トランザクションの保持時間`。
+  保持時間にアプリの外部待ちが入ると跳ね上がり、プール上限に当たる（実測: 500/秒 × 50ms = 25 本必要、プール 10 で p95 が 7 秒）。
+- 「DB の CPU が低いのに遅い」を検出するため、**待たされているクライアント数（`cl_waiting`）と、CPU 使用率を同じグラフに出す**。
+
 ## 目的と、やらないこと
 
 | やる | やらない |
