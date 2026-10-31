@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>caplab — DB 容量実験</title>
+<style>
+:root{--bg:#fff;--fg:#1b1f27;--mut:#667085;--line:#e3e6ec;--card:#f6f7f9;--ac:#2563eb;--ok:#15803d;--warn:#b45309;--bad:#c62828;--okbg:#e8f5ec;--warnbg:#fdf3e1;--badbg:#fdeaea;
+--c0:#2563eb;--c1:#d9480f;--c2:#0f9d8a;--c3:#8e44ad;--c4:#b8860b;--c5:#c2255c;--c6:#4b5563}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#14171c;--fg:#e6e8ec;--mut:#9aa3b2;--line:#2a2f38;--card:#1c2027;--ac:#6ea0ff;--ok:#5cc27a;--warn:#e0a84a;--bad:#ff7b7b;--okbg:#17301f;--warnbg:#33290f;--badbg:#3a1a1a;
+--c0:#6ea0ff;--c1:#ff9a62;--c2:#4fd1bd;--c3:#c39bff;--c4:#e6c35c;--c5:#ff7aa8;--c6:#aab2bf}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
+header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+h1{font-size:16px;margin:0}h2{font-size:15px;margin:0 0 8px}h3{font-size:13px;margin:12px 0 6px;color:var(--mut);font-weight:600}
+nav{display:flex;gap:4px;padding:8px 16px 0;border-bottom:1px solid var(--line);overflow-x:auto}
+nav button{border:0;background:none;color:var(--mut);padding:8px 12px;border-bottom:2px solid transparent;cursor:pointer;font:inherit;white-space:nowrap}
+nav button.on{color:var(--fg);border-color:var(--ac);font-weight:600}
+main{padding:16px;max-width:1200px;margin:0 auto}
+section{display:none}section.on{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px}
+.grid{display:grid;gap:12px}.g2{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}.g3{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+label{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--mut)}
+input,select,textarea{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 7px;min-width:0}
+textarea{width:100%;font-family:ui-monospace,monospace;font-size:12px;min-height:200px}
+button.b{font:inherit;border:1px solid var(--line);background:var(--bg);color:var(--fg);padding:6px 12px;border-radius:6px;cursor:pointer}
+button.b:hover{border-color:var(--ac)}button.p{background:var(--ac);color:#fff;border-color:var(--ac)}button.p:disabled,button.b:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--mut);font-weight:600;font-size:12px}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.chip{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid var(--line)}
+.chip.ok{color:var(--ok);background:var(--okbg)}.chip.ng{color:var(--bad);background:var(--badbg)}
+.note{color:var(--mut);font-size:12px}
+.msg{padding:8px 10px;border-radius:6px;margin:6px 0;font-size:13px}.msg.w{background:var(--warnbg);color:var(--warn)}.msg.b{background:var(--badbg);color:var(--bad)}.msg.o{background:var(--okbg);color:var(--ok)}
+.tile{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--bg)}.tile .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}.tile .l{font-size:12px;color:var(--mut)}
+.tile.ok .v{color:var(--ok)}.tile.warn .v{color:var(--warn)}.tile.bad .v{color:var(--bad)}
+.bar{position:relative;height:18px;background:var(--bg);border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.bar .f{position:absolute;left:0;top:0;bottom:0;background:var(--c0);opacity:.85}.bar .r{position:absolute;top:5px;bottom:5px;background:var(--fg);opacity:.35}
+.bar i{position:absolute;top:0;bottom:0;width:1px;background:var(--bad)}.barlab{position:relative;height:14px;font-size:11px;color:var(--mut)}.barlab span{position:absolute;transform:translateX(-50%)}
+.chart{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px}.chart h3{margin:0 0 4px}.chart canvas{width:100%;height:160px;display:block}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--mut);margin-top:2px}.legend b{display:inline-block;width:10px;height:3px;margin-right:4px;vertical-align:middle}
+progress{width:100%;height:10px}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;overflow:auto;font-size:12px;max-height:260px}
+.tw{overflow-x:auto}
+.verdict{font-size:16px;font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <h1>caplab <span class="note">DB 容量実験（MySQL / PostgreSQL）</span></h1>
+  <div id="doctor" class="row" style="align-items:center"></div>
+</header>
+<nav id="nav">
+  <button data-t="setup" class="on">① 設定</button>
+  <button data-t="est">② 試算</button>
+  <button data-t="run">③ 実行とメトリクス</button>
+  <button data-t="hist">④ 履歴</button>
+</nav>
+<main>
+
+<section id="setup" class="on">
+  <div class="grid g2">
+    <div class="card">
+      <h2>1. テーブル（親 → 子 → 孫）</h2>
+      <p class="note">カラム数とサイズ（小≈100B / 中≈1KB / 大≈10KB）と件数だけを決めます。型と値の中身は自動です。子の件数は「親 1 件あたり」。</p>
+      <div class="tw"><table><thead><tr><th>表名</th><th>親</th><th class="n">カラム数</th><th>サイズ</th><th class="n">件数</th><th></th></tr></thead><tbody id="tb"></tbody></table></div>
+      <div class="row" style="margin-top:8px"><button class="b" id="addT">＋ 表を追加</button><label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" id="fkidx"> 外部キーにインデックスを付ける</label><label>認証ユーザー数 / テナント（0 で認証なし）<input type="number" id="authU" min="0" style="width:90px"></label></div>
+      <div id="tsum" class="note" style="margin-top:6px"></div>
+      <div class="row" style="margin-top:8px"><button class="b" id="showDdl">DDL を見る</button></div>
+      <pre id="ddl" hidden></pre>
+    </div>
+    <div class="card">
+      <h2>2. 接続先と条件</h2>
+      <div class="grid g3">
+        <label>エンジン<select id="engine"><option value="postgres">PostgreSQL</option><option value="mysql">MySQL</option></select></label>
+        <label>テナント数<input type="number" id="tenants" min="1"></label>
+        <label>DB の vCPU<input type="number" id="vcpu" step="0.5" min="0.5"></label>
+        <label>max_connections<input type="number" id="maxc" min="1"></label>
+        <label>安全使用率（%）<input type="number" id="safe" min="10" max="95"></label>
+        <label>予約 vCPU<input type="number" id="resv" step="0.05" min="0"></label>
+        <label>往復遅延 RTT（ms）<input type="number" id="rtt" step="0.1" min="0"></label>
+        <label>合格基準 p95（ms）<input type="number" id="slo95" min="1"></label>
+        <label>合格基準 エラー率（%）<input type="number" id="sloerr" step="0.01" min="0"></label>
+      </div>
+      <label style="margin-top:8px">接続文字列（空なら環境変数 CAPLAB_DSN）<input id="dsn" placeholder="postgres: host=127.0.0.1 port=5432 user=… dbname=…　/　mysql: mysql://user:pass@127.0.0.1:3306/caplab"></label>
+      <div class="row" style="margin-top:8px"><label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" id="allowW"> 書き込みクエリの実行を許可する</label><label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" id="retry"> 接続エラーのとき新しい接続でやり直す</label></div>
+      <p class="note">RTT は分からなければ 0 のままで構いません。②試算で複数の値を並べて見られます。</p>
+      <details style="margin-top:6px"><summary>詳細な条件（送り方・暗号化・遅延の演出・Proxy・Reader・費用）</summary>
+        <div class="grid g3" style="margin-top:8px">
+          <label>クエリの送り方<select id="proto"><option value="text">テキスト（値を埋め込む）</option><option value="prepared">プリペア（再利用）</option><option value="prepared_each">毎回プリペア（Go の MySQL 既定）</option></select></label>
+          <label>接続の暗号化<select id="tls"><option value="off">しない</option><option value="insecure">する（証明書は検証しない）</option><option value="verify">する（証明書を検証）</option></select></label>
+          <label>遅延の演出<select id="netmode"><option value="sleep">各クエリの後に待つ（簡易）</option><option value="proxy">中間サーバ（精度が高い）</option></select></label>
+          <label>遅延のゆらぎ（ms）<input type="number" id="jitter" step="0.1" min="0"></label>
+          <label>vCPU 単価（/時間、任意）<input type="number" id="price" step="0.01" min="0"></label>
+          <label>Reader の接続先（任意）<input id="readerdsn"></label>
+          <label>Proxy の種類<select id="pxkind"><option value="">なし</option><option value="pgbouncer">PgBouncer</option><option value="proxysql">ProxySQL</option></select></label>
+          <label style="grid-column:span 2">Proxy の管理接続先<input id="pxadmin" placeholder="PgBouncer: host=127.0.0.1 port=6432 user=postgres dbname=pgbouncer"></label>
+        </div>
+        <div class="row" style="margin-top:8px"><button class="b" id="probe">RTT を計測（probe）</button><span id="probeOut" class="note"></span></div>
+      </details>
+      <div class="row"><button class="b p" id="saveP">保存</button><span id="saved" class="note"></span></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>3. ワークロード（ざっくりモード）</h2>
+    <p class="note">クエリと頻度を 1 つずつ登録する代わりに、ざっくりした値から「ワーカー・Web（認証つき）・重いバッチ」を作ります。作った後は下の詳細 JSON で自由に直せます。</p>
+    <div class="grid g3">
+      <label>Web ユーザー数 / テナント<input type="number" id="s_users" value="50"></label>
+      <label>1 ユーザーの操作（回/分）<input type="number" id="s_ops" value="2" step="0.5"></label>
+      <label>Web の取り方<select id="s_flow"><option value="nplus1">親→子→孫（N+1）</option><option value="join">JOIN で一括</option><option value="in">IN でまとめる</option></select></label>
+      <label>認証キャッシュ率（0〜1）<input type="number" id="s_cache" value="0.9" step="0.05" min="0" max="1"></label>
+      <label>ワーカー間隔（ms、カンマ区切り）<input id="s_workers" value="1000,10000,10000,60000,60000"></label>
+      <label style="justify-content:flex-end"><span style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="s_batch" checked> 重いバッチ（60 秒ごと）</span><span style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="s_stagger" checked> ワーカーの起動時刻をずらす</span></label>
+    </div>
+    <details style="margin-top:8px"><summary>追加の負荷（SSE の一斉接続・負荷の形・テナントの偏り・障害注入）</summary>
+      <div class="grid g3" style="margin-top:8px">
+        <label>SSE: 1 テナントの接続数（0 で無し）<input type="number" id="s_sse" value="0" min="0"></label>
+        <label style="justify-content:flex-end"><span style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="s_sf"> 接続をテナントごとに 1 回の取得にまとめる（singleflight）</span></label>
+        <label>Web の負荷の形<select id="s_shape"><option value="">一定</option><option value="spike">スパイク（途中で 5 倍）</option><option value="ramp">ランプ（0.2 → 2.5 倍）</option></select></label>
+        <label>テナントの偏り（Zipf 指数、0 で一様）<input type="number" id="s_skew" value="0" step="0.1" min="0"></label>
+        <label>障害注入: 接続を強制切断（計測開始から N 秒、空で無し）<input type="number" id="s_chaos" min="0" placeholder="例 10"></label>
+      </div>
+    </details>
+    <div class="row" style="margin-top:8px"><button class="b p" id="mkWork">ワークロードを作る</button><span id="wsum" class="note"></span></div>
+    <details style="margin-top:10px"><summary>取り込み（DDL・クエリのログや統計）</summary>
+      <div class="grid g2" style="margin-top:8px">
+        <div><h3 style="margin-top:0">CREATE TABLE を貼る → かんたんスキーマ</h3><textarea id="impDdl" style="min-height:120px" placeholder="CREATE TABLE accounts (...);&#10;CREATE TABLE projects (id bigint primary key, account_id bigint references accounts(id), ...);"></textarea>
+        <div class="row" style="margin-top:6px"><button class="b" id="impDdlGo">解析して適用</button></div><div id="impDdlOut" class="note"></div></div>
+        <div><h3 style="margin-top:0">クエリを取り込む（頻度つき）</h3><textarea id="impQ" style="min-height:120px" placeholder="-- calls=7200&#10;SELECT ... WHERE tenant_id = 5 AND id = 3;&#10;（貼り付けなくても、下の「DB の統計から」で取れます）"></textarea>
+        <div class="row" style="margin-top:6px"><label>集計期間（秒、空で自動）<input type="number" id="impWin" style="width:100px"></label><button class="b" id="impQText">貼り付けから適用</button><button class="b" id="impQDb">DB の統計から適用</button></div><div id="impQOut" class="note"></div></div>
+      </div>
+      <p class="note">取り込んだクエリの値は 1〜1000 の乱数に置き換わります。表名は取り込み元のままなので、このアプリのスキーマに同名の表が無いと実行できません。</p>
+    </details>
+    <details style="margin-top:10px"><summary>詳細 JSON（クエリ・アクター）を編集</summary>
+      <p class="note">クエリの SQL では <code>:tenant</code> / <code>:rand_表名</code>（その表の乱数 id）/ <code>:ステップid</code>（前のステップの結果の id）を使えます。ステップの <code>foreach</code> は「そのステップの結果の各行について実行」（N+1）、<code>cache_hit</code> は DB を引かない確率。</p>
+      <textarea id="adv"></textarea>
+      <div class="row" style="margin-top:6px"><button class="b" id="applyAdv">適用</button><span id="advmsg" class="note"></span></div>
+    </details>
+  </div>
+</section>
+
+<section id="est">
+  <div class="card"><div class="row"><button class="b" id="diag">診断（EXPLAIN・lint・データ量）</button><span class="note">クエリの全件走査、テナント条件の抜け、データがメモリに収まるかを確認します。</span></div><div id="diagOut"></div></div>
+  <div class="card">
+    <div class="row"><label style="flex:1;min-width:260px">テナント数: <b id="estN"></b><input type="range" id="estR" min="10" max="5000" step="10"></label><label>RTT（ms）<input type="number" id="estRtt" step="0.1" min="0" style="width:90px"></label></div>
+  </div>
+  <div id="estBody"></div>
+</section>
+
+<section id="run">
+  <div class="card">
+    <div class="row">
+      <label>計測時間（秒）<input type="number" id="r_secs" value="30" min="3" style="width:90px"></label>
+      <label>ウォームアップ（秒）<input type="number" id="r_warm" value="5" min="0" style="width:90px"></label>
+      <button class="b p" id="bEasy">▶ かんたん実行（投入 → 校正 → 実行）</button>
+      <button class="b" id="bRun">実行のみ</button>
+      <button class="b" id="bCal">校正のみ</button>
+      <button class="b" id="bApply">スキーマ投入のみ</button>
+      <button class="b" id="bStop" disabled>■ 停止</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label>掃引するテナント数（カンマ区切り）<input id="sw_ns" value="50,100,200,400" style="width:200px"></label><button class="b" id="bSweep">テナント数の掃引</button>
+      <label>繰り返し回数<input type="number" id="rp_n" value="3" min="2" max="20" style="width:80px"></label><button class="b" id="bRepeat">N 回繰り返してばらつきを見る</button>
+    </div>
+    <div id="jobBox" hidden style="margin-top:8px"><div id="jobTxt" class="note"></div><progress id="jobP" max="1" value="0"></progress></div>
+  </div>
+  <div id="results"></div>
+  <div id="concl"></div>
+  <div id="board" class="grid g3" style="margin-bottom:12px"></div>
+  <div id="charts" class="grid g2"></div>
+  <div id="cmp"></div>
+  <div id="extras"></div>
+</section>
+
+<section id="hist"><div class="card"><h2>掃引・繰り返しの結果</h2><div id="resList" class="note">まだありません</div></div>
+<div class="card"><h2>2 つの実行を重ねて比較</h2><div class="row"><label>指標<select id="cmpMetric"><option value="_cpu">DB の CPU 使用率（%）</option><option value="_p95">ループ遅延 p95（ms）</option><option value="_loops">ループ / 秒</option><option value="db.conns">DB の接続数</option><option value="pool.waiting">プール待ち</option><option value="proxy.sv_active">Proxy → DB（実行中）</option></select></label><button class="b" id="cmpGo" disabled>選んだ 2 つを重ねる</button><span class="note" id="cmpHint">下の表で 2 つにチェックを入れてください</span></div><div id="cmpChart" style="margin-top:8px"></div></div>
+<div class="card"><h2>実行の履歴</h2><div class="tw"><table><thead><tr><th></th><th>実行</th><th>状態</th><th>エンジン</th><th class="n">テナント</th><th>判定</th><th>最初に詰まった所</th><th></th></tr></thead><tbody id="hb"></tbody></table></div></div></section>
+
+</main>
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmt = (x, d = 1) => x == null || isNaN(x) ? '—' : (+x).toFixed(d);
+async function api(path, opt = {}) {
+  const r = await fetch(path, { headers: { 'content-type': 'application/json' }, ...opt, body: opt.body ? JSON.stringify(opt.body) : undefined });
+  const t = await r.text();
+  if (!r.ok) throw new Error(t || r.statusText);
+  return t ? JSON.parse(t) : null;
+}
+const toast = (m, bad) => { const e = $('#saved'); e.textContent = m; e.style.color = bad ? 'var(--bad)' : 'var(--ok)'; };
+
+let P = null;          // project
+let tables = [];       // 編集中の表
+
+// ---------- タブ ----------
+$('#nav').onclick = e => { const b = e.target.closest('button'); if (!b) return; $$('#nav button').forEach(x => x.classList.toggle('on', x === b)); $$('section').forEach(s => s.classList.toggle('on', s.id === b.dataset.t)); if (b.dataset.t === 'est') refreshEst(); if (b.dataset.t === 'hist') loadHist(); if (b.dataset.t === 'run') redrawAll(); };
+
+// ---------- 診断 ----------
+async function loadDoctor() {
+  try { const d = await api('/api/doctor'); $('#doctor').innerHTML = d.map(c => `<span class="chip ${c.ok ? 'ok' : 'ng'}" title="${esc(c.detail)}">${c.ok ? '✓' : '!'} ${esc(c.name)}</span>`).join(''); }
+  catch (e) { $('#doctor').innerHTML = `<span class="chip ng">診断に失敗: ${esc(e.message)}</span>`; }
+}
+
+// ---------- 設定 ----------
+function renderTables() {
+  $('#tb').innerHTML = tables.map((t, i) => `<tr>
+    <td><input value="${esc(t.name)}" data-i="${i}" data-k="name" style="width:110px"></td>
+    <td><select data-i="${i}" data-k="parent"><option value="">（なし）</option>${tables.filter((x, j) => j !== i).map(x => `<option ${x.name === t.parent ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></td>
+    <td class="n"><input type="number" value="${t.columns}" min="0" max="60" data-i="${i}" data-k="columns" style="width:70px"></td>
+    <td><select data-i="${i}" data-k="size">${['S', 'M', 'L'].map(s => `<option value="${s}" ${t.size === s ? 'selected' : ''}>${{ S: '小', M: '中', L: '大' }[s]}</option>`).join('')}</select></td>
+    <td class="n"><input type="number" value="${t.rows}" min="1" data-i="${i}" data-k="rows" style="width:90px"></td>
+    <td><button class="b" data-del="${i}">削除</button></td></tr>`).join('');
+  summarizeTables();
+}
+function rowsPerTenant() {
+  const m = {}; const depth = t => { let d = 0, c = t; while (c) { d++; c = tables.find(x => x.name === c.parent); } return d; };
+  [...tables].sort((a, b) => depth(a) - depth(b)).forEach(t => { m[t.name] = t.parent ? (m[t.parent] || 1) * t.rows : t.rows; });
+  return m;
+}
+function summarizeTables() {
+  const m = rowsPerTenant(); const T = +$('#tenants').value || 1; const bytes = { S: 100, M: 1000, L: 10000 };
+  let total = 0, size = 0; tables.forEach(t => { total += (m[t.name] || 0) * T; size += (m[t.name] || 0) * T * bytes[t.size]; });
+  const auth = +$('#authU').value || 0; total += auth * T;
+  $('#tsum').textContent = tables.map(t => `${t.name}: ${(m[t.name] || 0).toLocaleString()}件/テナント`).join('、') + ` ／ 全体 約 ${total.toLocaleString()} 行・約 ${(size / 1e6).toFixed(1)} MB（テナント ${T}）`;
+}
+$('#tb').addEventListener('input', e => { const i = e.target.dataset.i; if (i == null) return; const k = e.target.dataset.k; tables[i][k] = ['columns', 'rows'].includes(k) ? +e.target.value : (k === 'parent' ? (e.target.value || null) : e.target.value); if (k === 'name') {} summarizeTables(); });
+$('#tb').addEventListener('change', e => { if (e.target.dataset.k === 'name' || e.target.dataset.k === 'parent') renderTables(); });
+$('#tb').addEventListener('click', e => { const d = e.target.dataset.del; if (d == null) return; tables.splice(+d, 1); renderTables(); });
+$('#addT').onclick = () => { const p = tables.length ? tables[tables.length - 1].name : null; tables.push({ name: 'table' + (tables.length + 1), parent: p, columns: 4, size: 'S', rows: 5 }); renderTables(); };
+['tenants', 'authU'].forEach(id => $('#' + id).addEventListener('input', summarizeTables));
+
+function fillForm() {
+  tables = JSON.parse(JSON.stringify(P.schema.tables)); renderTables();
+  $('#fkidx').checked = P.schema.fk_index; $('#authU').value = P.schema.auth_users_per_tenant ?? 0;
+  $('#engine').value = P.engine; $('#tenants').value = P.tenants; $('#vcpu').value = P.profile.vcpu; $('#maxc').value = P.profile.max_connections;
+  $('#safe').value = Math.round(P.profile.safe_util * 100); $('#resv').value = P.profile.reserve_vcpu; $('#rtt').value = P.profile.rtt_ms;
+  $('#slo95').value = P.slo.p95_ms; $('#sloerr').value = +(P.slo.error_rate * 100).toFixed(4); $('#dsn').value = P.dsn || ''; $('#allowW').checked = !!P.allow_writes;
+  $('#retry').checked = P.retry_conn !== false; $('#proto').value = P.protocol || 'text'; $('#tls').value = P.tls || 'off'; $('#netmode').value = P.profile.net_mode || 'sleep'; $('#jitter').value = P.profile.jitter_ms || 0; $('#price').value = P.profile.price_per_vcpu_hour ?? ''; $('#readerdsn').value = P.reader_dsn || ''; $('#pxkind').value = P.proxy?.kind || ''; $('#pxadmin').value = P.proxy?.admin_dsn || '';
+  $('#adv').value = JSON.stringify({ queries: P.queries, actors: P.actors }, null, 2);
+  $('#wsum').textContent = P.actors.length ? `${P.actors.length} 個のアクター: ` + P.actors.map(a => a.name).join(', ') : 'まだワークロードがありません';
+  $('#estR').value = P.tenants; $('#estRtt').value = P.profile.rtt_ms; summarizeTables();
+}
+function collect() {
+  const q = { ...P };
+  q.schema = { tables, fk_index: $('#fkidx').checked, auth_users_per_tenant: (+$('#authU').value || 0) > 0 ? +$('#authU').value : null };
+  q.engine = $('#engine').value; q.tenants = +$('#tenants').value; q.dsn = $('#dsn').value.trim(); q.allow_writes = $('#allowW').checked;
+  q.profile = { vcpu: +$('#vcpu').value, max_connections: +$('#maxc').value, safe_util: +$('#safe').value / 100, reserve_vcpu: +$('#resv').value, rtt_ms: +$('#rtt').value };
+  q.slo = { p95_ms: +$('#slo95').value, error_rate: +$('#sloerr').value / 100 };
+  q.retry_conn = $('#retry').checked; q.protocol = $('#proto').value; q.tls = $('#tls').value; q.reader_dsn = $('#readerdsn').value.trim();
+  q.profile.net_mode = $('#netmode').value; q.profile.jitter_ms = +$('#jitter').value || 0; q.profile.price_per_vcpu_hour = $('#price').value === '' ? null : +$('#price').value; q.profile.measured_rtt_ms = P.profile.measured_rtt_ms ?? null;
+  q.proxy = $('#pxkind').value ? { kind: $('#pxkind').value, admin_dsn: $('#pxadmin').value.trim() } : null;
+  return q;
+}
+async function saveProject() { P = await api('/api/project', { method: 'PUT', body: collect() }); fillForm(); }
+$('#saveP').onclick = async () => { try { await saveProject(); toast('保存しました'); loadDoctor(); } catch (e) { toast(e.message, true); } };
+$('#showDdl').onclick = async () => { try { await saveProject(); const d = await api('/api/ddl'); const e = $('#ddl'); e.textContent = d.join(';\n') + ';'; e.hidden = !e.hidden; } catch (e) { toast(e.message, true); } };
+$('#mkWork').onclick = async () => {
+  try {
+    await saveProject();
+    P = await api('/api/simple', { method: 'POST', body: { tenants: +$('#tenants').value, users_per_tenant: +$('#s_users').value, user_ops_per_min: +$('#s_ops').value, worker_every_ms: $('#s_workers').value.split(',').map(x => +x.trim()).filter(x => x > 0), web_flow: $('#s_flow').value, auth_cache_hit: +$('#s_cache').value, batch: $('#s_batch').checked, stagger: $('#s_stagger').checked, sse_conns: +$('#s_sse').value || null, sse_singleflight: $('#s_sf').checked, web_shape: $('#s_shape').value || null, web_skew: +$('#s_skew').value || null, chaos_kill_at: $('#s_chaos').value === '' ? null : +$('#s_chaos').value } });
+    fillForm(); toast('ワークロードを作りました（②試算 で確認できます）');
+  } catch (e) { toast(e.message, true); }
+};
+$('#applyAdv').onclick = async () => { try { const j = JSON.parse($('#adv').value); P = await api('/api/project', { method: 'PUT', body: { ...collect(), queries: j.queries, actors: j.actors } }); fillForm(); $('#advmsg').textContent = '適用しました'; } catch (e) { $('#advmsg').textContent = e.message; } };
+
+// ---------- 試算 ----------
+let estTimer;
+function refreshEst() { clearTimeout(estTimer); estTimer = setTimeout(doEst, 120); }
+$('#estR').oninput = () => { $('#estN').textContent = $('#estR').value; refreshEst(); };
+$('#estRtt').oninput = refreshEst;
+function bar(util, lo, hi) {
+  const max = 1.2, pc = x => Math.min(100, x / max * 100);
+  const marks = [[P.profile.safe_util, `安全 ${Math.round(P.profile.safe_util * 100)}%`], [0.88, '悪化 88%'], [0.95, '崩壊 95%']];
+  return `<div class="bar"><div class="f" style="width:${pc(util)}%"></div>${hi > lo + 1e-9 ? `<div class="r" style="left:${pc(lo)}%;width:${pc(hi) - pc(lo)}%"></div>` : ''}${marks.map(m => `<i style="left:${pc(m[0])}%"></i>`).join('')}</div>
+  <div class="barlab">${marks.map(m => `<span style="left:${pc(m[0])}%">${m[1]}</span>`).join('')}</div>`;
+}
+async function doEst() {
+  if (!P) return;
+  const N = +$('#estR').value, rtt = +$('#estRtt').value; $('#estN').textContent = N;
+  try {
+    const e = await api(`/api/estimate?tenants=${N}&rtt=${rtt}`);
+    const range = (a, b, d = 2) => Math.abs(b - a) > 1e-9 ? `${fmt(a, d)}〜${fmt(b, d)}` : fmt(a, d);
+    const cls = e.util > 0.88 ? 'bad' : e.util > P.profile.safe_util ? 'warn' : 'ok';
+    const sens = await Promise.all([0, 0.3, 1, 2, 5].map(r => api(`/api/estimate?tenants=${N}&rtt=${r}`).then(x => ({ r, x }))));
+    $('#estBody').innerHTML = `
+    <div class="grid g3">
+      <div class="tile ${cls}"><div class="v">${range(e.util_low * 100, e.util_high * 100, 0)}%</div><div class="l">DB の CPU 使用率（${fmt(e.cpu_vcpu, 2)} vCPU / ${P.profile.vcpu}）</div></div>
+      <div class="tile"><div class="v">${fmt(e.total_qps, 0)}</div><div class="l">クエリ / 秒</div></div>
+      <div class="tile"><div class="v">${isFinite(e.safe_tenants) ? range(e.safe_tenants_low, e.safe_tenants_high, 0) : '∞'}</div><div class="l">安全上限のテナント数（使用率 ${Math.round(P.profile.safe_util * 100)}% 以内）</div></div>
+      <div class="tile ${e.conns_needed > e.conns_budget ? 'bad' : ''}"><div class="v">${fmt(e.conns_needed, 0)}</div><div class="l">同時に必要な接続（プール上限の合計 ${e.conns_pool_max} / 予算 ${e.conns_budget}）</div></div>
+    </div>
+    <div class="card" style="margin-top:12px"><h3 style="margin-top:0">CPU 使用率（試算は線形。実機は 88% 付近から待ち行列が急に伸びます）</h3>${bar(e.util, e.util_low, e.util_high)}</div>
+    ${e.warnings.map(w => `<div class="msg w">${esc(w)}</div>`).join('')}
+    <div class="grid g2">
+      <div class="card"><h3 style="margin-top:0">アクター別</h3><div class="tw"><table><thead><tr><th>アクター</th><th class="n">ループ/秒</th><th class="n">クエリ/ループ</th><th class="n">vCPU</th><th class="n">必要な接続</th><th class="n">プール上限</th></tr></thead><tbody>
+      ${e.actors.map(a => `<tr><td>${esc(a.name)}</td><td class="n">${fmt(a.loops_per_s, 2)}</td><td class="n">${fmt(a.queries_per_loop, 1)}</td><td class="n">${fmt(a.cpu_vcpu, 3)}</td><td class="n" style="${a.conns_needed > a.pool_max_open ? 'color:var(--bad)' : ''}">${fmt(a.conns_needed, 1)}</td><td class="n">${a.pool_max_open}</td></tr>`).join('')}</tbody></table></div></div>
+      <div class="card"><h3 style="margin-top:0">クエリ別</h3><div class="tw"><table><thead><tr><th>クエリ</th><th class="n">qps</th><th class="n">ms/回</th><th class="n">vCPU</th></tr></thead><tbody>
+      ${e.queries.sort((a, b) => b.cpu_vcpu - a.cpu_vcpu).map(q => `<tr><td>${esc(q.query)}</td><td class="n">${fmt(q.qps, 1)}</td><td class="n">${fmt(q.cpu_ms, 3)}${q.calibrated ? '' : ' <span class="chip">仮置き</span>'}</td><td class="n">${fmt(q.cpu_vcpu, 3)}</td></tr>`).join('')}</tbody></table></div></div>
+    </div>
+    <div class="card"><h3 style="margin-top:0">往復遅延（RTT）を変えたとき（${N} テナント）— RTT が分からなくても、結論が変わる境目を探せます</h3><div class="tw"><table><thead><tr><th>RTT</th>${e.actors.map(a => `<th class="n">${esc(a.name)} の接続</th>`).join('')}<th class="n">必要な接続 計</th><th>警告</th></tr></thead><tbody>
+    ${sens.map(({ r, x }) => `<tr><td>${r} ms</td>${x.actors.map(a => `<td class="n" style="${a.conns_needed > a.pool_max_open ? 'color:var(--bad);font-weight:600' : ''}">${fmt(a.conns_needed, 1)}</td>`).join('')}<td class="n">${fmt(x.conns_needed, 0)}</td><td>${x.warnings.filter(w => w.includes('プール上限')).length ? '<span class="chip ng">プール不足</span>' : '<span class="chip ok">OK</span>'}</td></tr>`).join('')}</tbody></table></div>
+    <p class="note">遅延は DB の CPU をほとんど使わず、1 ループの時間と接続の占有時間を伸ばします（必要な接続 ≒ ループ/秒 × 1 ループの時間）。</p></div>`;
+  } catch (er) { $('#estBody').innerHTML = `<div class="msg b">${esc(er.message)}</div>`; }
+}
+
+// ---------- チャート ----------
+const COLORS = ['--c0', '--c1', '--c2', '--c3', '--c4', '--c5', '--c6'];
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let hoverT = null, charts = [];
+class Chart {
+  constructor(title, spec) {
+    this.spec = spec; this.el = document.createElement('div'); this.el.className = 'chart';
+    this.el.innerHTML = `<h3>${esc(title)}</h3><canvas></canvas><div class="legend"></div>`;
+    this.cv = $('canvas', this.el); this.lg = $('.legend', this.el);
+    this.cv.addEventListener('mousemove', e => { const r = this.cv.getBoundingClientRect(); hoverT = this.t0 + (e.clientX - r.left - 44) / (r.width - 54) * (this.t1 - this.t0); onHover(); });
+    this.cv.addEventListener('mouseleave', () => { hoverT = null; onHover(); });
+  }
+  series(points) {
+    const keys = new Set(); points.forEach(p => Object.keys(p.v).forEach(k => { if (this.spec.match(k)) keys.add(k); }));
+    return [...keys].sort().map((k, i) => ({ key: k, label: this.spec.label(k), color: css(COLORS[i % COLORS.length]) }));
+  }
+  draw(points, events) {
+    const cv = this.cv, dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+    if (!W) return; cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
+    const ser = this.series(points), sc = this.spec.scale || 1, L = 44, R = 10, T = 8, B = 18, mut = css('--mut'), line = css('--line');
+    this.t0 = 0; this.t1 = Math.max(30, points.length ? points[points.length - 1].t : 30);
+    let ymax = 0; ser.forEach(s => points.forEach(p => { const v = p.v[s.key]; if (v != null) ymax = Math.max(ymax, v * sc); }));
+    (this.spec.thresholds || []).forEach(t => { ymax = Math.max(ymax, t.y(this) * 1.05); }); if (this.spec.ymax) ymax = Math.max(ymax, this.spec.ymax); if (ymax <= 0) ymax = 1; ymax *= 1.08;
+    const X = t => L + (t - this.t0) / (this.t1 - this.t0) * (W - L - R), Y = v => T + (1 - v / ymax) * (H - T - B);
+    g.font = '10px system-ui'; g.fillStyle = mut; g.strokeStyle = line; g.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) { const v = ymax * i / 4, y = Y(v); g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke(); g.textAlign = 'right'; g.fillText(v >= 100 ? v.toFixed(0) : v.toFixed(v < 10 ? 1 : 0) + (this.spec.unit || ''), L - 4, y + 3); }
+    g.textAlign = 'center'; for (let i = 0; i <= 5; i++) { const t = this.t0 + (this.t1 - this.t0) * i / 5; g.fillText(t.toFixed(0) + 's', X(t), H - 4); }
+    (events || []).forEach(([t, txt]) => { g.strokeStyle = mut; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(t), T); g.lineTo(X(t), H - B); g.stroke(); g.setLineDash([]); g.textAlign = 'left'; g.fillStyle = mut; g.fillText(txt, X(t) + 3, T + 9); });
+    (this.spec.thresholds || []).forEach(t => { const y = Y(t.y(this)); g.strokeStyle = css('--bad'); g.setLineDash([4, 3]); g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke(); g.setLineDash([]); g.fillStyle = css('--bad'); g.textAlign = 'right'; g.fillText(t.label, W - R - 2, y - 2); });
+    ser.forEach(s => { g.strokeStyle = s.color; g.lineWidth = 1.6; g.beginPath(); let st = false; points.forEach(p => { const v = p.v[s.key]; if (v == null) return; const x = X(p.t), y = Y(v * sc); if (!st) { g.moveTo(x, y); st = true; } else g.lineTo(x, y); }); g.stroke(); });
+    let tip = null;
+    if (hoverT != null && points.length) { let best = points[0]; points.forEach(p => { if (Math.abs(p.t - hoverT) < Math.abs(best.t - hoverT)) best = p; }); const x = X(best.t); g.strokeStyle = mut; g.lineWidth = 1; g.beginPath(); g.moveTo(x, T); g.lineTo(x, H - B); g.stroke(); tip = best; }
+    this.lg.innerHTML = ser.map(s => { const v = tip ? tip.v[s.key] : null; return `<span><b style="background:${s.color}"></b>${esc(s.label)}${v != null ? ' = ' + (v * sc).toFixed(2) : ''}</span>`; }).join('') + (tip ? `<span>t=${tip.t.toFixed(0)}s</span>` : '');
+  }
+}
+const prefix = (p, post) => k => k.startsWith(p) && (!post || k.endsWith(post));
+function buildCharts() {
+  const c = $('#charts'); c.innerHTML = ''; charts = [];
+  const add = (t, spec) => { const ch = new Chart(t, spec); charts.push(ch); c.appendChild(ch.el); };
+  add('DB の CPU 使用率（%）', { match: k => k === 'db.cpu_util', label: () => 'CPU 使用率', scale: 100, unit: '', ymax: 100, thresholds: [{ y: () => P.profile.safe_util * 100, label: '安全' }, { y: () => 88, label: '悪化開始' }] });
+  add('接続とプール待ち（接続 = DB 側の接続数）', { match: k => ['db.conns', 'db.active', 'pool.waiting'].includes(k), label: k => ({ 'db.conns': 'DB の接続数', 'db.active': 'DB で実行中', 'pool.waiting': 'プールで待機' }[k]) });
+  add('ループ遅延 p95（ms）— スケジュール時刻から', { match: prefix('p95.'), label: k => k.slice(4), thresholds: [{ y: () => P.slo.p95_ms, label: '合格基準' }] });
+  add('ループ / 秒（アクター別）', { match: prefix('loops.'), label: k => k.slice(6) });
+  add('スケジュール遅延 p99（ms）— 予定時刻からの遅れ', { match: k => k === 'lateness.p99', label: () => '予定からの遅れ' });
+  add('負荷生成側の CPU（コア）— 高いと測定が信用できない', { match: k => k === 'gen.cpu_cores', label: () => '負荷側 CPU', thresholds: [{ y: () => 0.8, label: '80%' }] });
+  add('エラー・見送り（件/秒）', { match: k => k === 'errors' || k === 'dropped', label: k => ({ errors: 'エラー', dropped: '捌ききれず見送り' }[k]) });
+  add('接続の 3 層（Proxy を設定したとき）: アプリ → Proxy / Proxy → DB / DB 側', { match: k => ['proxy.clients', 'proxy.sv_active', 'proxy.sv_idle', 'proxy.cl_waiting', 'db.conns'].includes(k), label: k => ({ 'proxy.clients': 'アプリ → Proxy', 'proxy.sv_active': 'Proxy → DB（実行中）', 'proxy.sv_idle': 'Proxy → DB（待機）', 'proxy.cl_waiting': 'Proxy で待機', 'db.conns': 'DB 側の接続' }[k]) });
+  add('ディスク読み（バッファに無かった読み取り / 秒）とキャッシュヒット率', { match: k => k === 'db.disk_reads', label: () => 'ディスク読み' });
+  add('負荷倍率（スパイク・ランプ）', { match: k => k === 'load.mult', label: () => '倍率' });
+  add('接続の作り直し（件/秒）と負荷側のメモリ（MB）', { match: k => k === 'pool.reconnects' || k === 'gen.rss_mb', label: k => k === 'gen.rss_mb' ? '負荷側メモリ(MB)' : '再接続' });
+  add('バッファキャッシュのヒット率', { match: k => k === 'db.cache_hit', label: () => 'ヒット率', ymax: 1 });
+}
+let raf = 0;
+function redrawAll() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; if (!$('#run').classList.contains('on')) return; charts.forEach(c => c.draw(L.points, L.events)); drawBoard(); }); }
+window.addEventListener('resize', redrawAll);
+
+// ---------- 実行 ----------
+const L = { id: null, points: [], events: [], es: null, run: null };
+function tile(label, val, cls = '') { return `<div class="tile ${cls}"><div class="v">${val}</div><div class="l">${label}</div></div>`; }
+function drawBoard() {
+  const p = L.points[L.points.length - 1]?.v || {};
+  const u = p['db.cpu_util'], sf = P?.profile.safe_util ?? 0.6;
+  const w = p['pool.waiting'] || 0, late = p['lateness.p99'] || 0, gen = (p['gen.cpu_cores'] || 0) * 100;
+  const err = p['errors'] || 0, drop = p['dropped'] || 0;
+  $('#board').innerHTML = L.points.length ? [
+    tile('DB の CPU 使用率', u == null ? '—' : fmt(u * 100, 0) + '%', u == null ? '' : u > .88 ? 'bad' : u > sf ? 'warn' : 'ok'),
+    tile('プールで待たされている', fmt(w, 0), w > 0 ? 'bad' : 'ok'),
+    tile('スケジュール遅延 p99', fmt(late, 0) + ' ms', late > 1000 ? 'bad' : late > 100 ? 'warn' : 'ok'),
+    tile('DB 接続 / 実行中', `${fmt(p['db.conns'], 0)} / ${fmt(p['db.active'], 0)}`),
+    tile('負荷側の CPU', fmt(gen, 0) + '%', gen > 80 ? 'bad' : gen > 50 ? 'warn' : 'ok'),
+    tile('エラー / 見送り', `${fmt(err, 0)} / ${fmt(drop, 0)}`, err + drop > 0 ? 'bad' : 'ok'),
+  ].join('') : '';
+}
+function renderConcl(r) {
+  const s = r?.summary; if (!s) { $('#concl').innerHTML = ''; $('#cmp').innerHTML = ''; $('#extras').innerHTML = ''; return; }
+  const c = s.conclusion, ok = c.slo_ok;
+  $('#concl').innerHTML = `<div class="card" style="border-color:${ok ? 'var(--ok)' : 'var(--bad)'}"><div class="verdict" style="color:${ok ? 'var(--ok)' : 'var(--bad)'}">${ok ? '✓' : '✗'} ${esc(c.verdict)}</div>
+    <div style="margin:6px 0"><b>最初に詰まった所:</b> ${esc(c.bottleneck)}${c.safe_tenants_extrapolated != null ? `　<b>実測からの安全上限:</b> 約 ${fmt(c.safe_tenants_extrapolated, 0)} テナント` : ''}</div>
+    ${c.messages.map(m => `<div class="msg ${/信用できません|超えて|待たされ|捌ききれ|エラー/.test(m) ? 'w' : 'o'}">${esc(m)}</div>`).join('')}
+    ${(r.notes || []).map(m => `<div class="msg w">${esc(m)}</div>`).join('')}
+    <div class="note">CPU 採取: ${esc(r.cpu_source)} ／ ${r.engine} ／ ${r.tenants} テナント ／ ${r.vcpu} vCPU ／ 計測 ${r.opts.secs} 秒（ウォームアップ ${r.opts.warmup} 秒）</div></div>`;
+  renderExtras(r);
+  const e = r.estimate; if (!e) return;
+  const aq = Object.values(s.queries).reduce((a, q) => a + q.qps, 0), ac = c.cpu_cores_avg;
+  const row = (n, est, act, d = 2, unit = '') => `<tr><td>${n}</td><td class="n">${fmt(est, d)}${unit}</td><td class="n">${act == null ? '—' : fmt(act, d) + unit}</td><td class="n">${act == null || !est ? '—' : (act / est >= 1 ? '+' : '') + fmt((act / est - 1) * 100, 0) + '%'}</td></tr>`;
+  $('#cmp').innerHTML = `<div class="card"><h3 style="margin-top:0">試算と実測の差（試算が信用できるかの目安）</h3><div class="tw"><table><thead><tr><th>項目</th><th class="n">試算（実行前）</th><th class="n">実測</th><th class="n">差</th></tr></thead><tbody>
+    ${row('クエリ / 秒', e.total_qps, aq, 0)}${row('DB の CPU（vCPU）', e.cpu_vcpu, ac, 3)}${row('CPU 使用率（%）', e.util * 100, c.cpu_util == null ? null : c.cpu_util * 100, 1)}</tbody></table></div>
+    <p class="note">差が大きいときは、校正（クエリ単体の CPU）と本番の負荷の条件（同時接続数・クエリの混ざり方）が違います。この試算は「目安」として扱ってください。${e.uncalibrated.length ? ' 未校正のクエリがあるため、仮置きの幅を使っています。' : ''}</p></div>`;
+}
+async function openRun(id, live) {
+  closeES(); L.id = id; L.points = []; L.events = []; L.run = null; renderConcl(null);
+  const r = await api(`/api/runs/${id}`); L.points = derive(r.series || []); L.events = r.events || []; L.run = r; renderConcl(r); redrawAll();
+  if (r.state === 'running') { watchRun(id); }
+}
+function closeES() { if (L.es) { L.es.close(); L.es = null; } clearInterval(L.poll); }
+function watchRun(id) {
+  $('#bStop').disabled = false; L.points = [];
+  L.es = new EventSource(`/api/runs/${id}/stream`); L.es.onmessage = m => { L.points.push(derive([JSON.parse(m.data)])[0]); redrawAll(); };
+  L.poll = setInterval(async () => {
+    try { const r = await api(`/api/runs/${id}?series=0`); L.events = r.events || []; if (r.state !== 'running') { closeES(); $('#bStop').disabled = true; const full = await api(`/api/runs/${id}`); L.points = derive(full.series); L.run = full; renderConcl(full); redrawAll(); loadHist(); } } catch (e) { }
+  }, 1500);
+}
+$('#bStop').onclick = async () => { if (L.id) await fetch(`/api/runs/${L.id}/stop`, { method: 'POST' }); };
+async function startJob(path, body) {
+  try { await saveProject(); } catch (e) { alert(e.message); return; }
+  try { const j = await api(path, { method: 'POST', body }); if (path === '/api/runs') { buildCharts(); await openRun(j.id); } else pollJob(); }
+  catch (e) { alert(e.message); }
+}
+const secs = () => ({ secs: +$('#r_secs').value, warmup: +$('#r_warm').value });
+$('#bEasy').onclick = () => { buildCharts(); startJob('/api/easy', secs()); };
+$('#bRun').onclick = () => startJob('/api/runs', secs());
+$('#bCal').onclick = () => startJob('/api/calibrate');
+$('#bApply').onclick = () => startJob('/api/schema/apply');
+let jobT;
+function pollJob() {
+  clearInterval(jobT); let opened = null;
+  const tick = async () => {
+    const j = await api('/api/job'); $('#jobBox').hidden = false;
+    $('#jobTxt').textContent = `${j.name}: ${j.step}${j.error ? ' — エラー: ' + j.error : ''}`; $('#jobTxt').style.color = j.error ? 'var(--bad)' : ''; $('#jobP').value = j.progress;
+    if (j.run_id && j.run_id !== opened) { opened = j.run_id; await openRun(j.run_id); }
+    if (!j.running) { clearInterval(jobT); loadDoctor(); loadResults().catch(() => {}); }
+  };
+  jobT = setInterval(tick, 700); tick();
+}
+
+// ---------- 履歴 ----------
+async function loadHist() {
+  loadResults();
+  const rs = await api('/api/runs');
+  $('#hb').innerHTML = rs.map(r => { const c = r.summary?.conclusion; return `<tr><td><input type="checkbox" data-cmp="${esc(r.id)}"></td><td>${esc(r.id)}</td><td>${esc(r.state)}</td><td>${esc(r.engine)}</td><td class="n">${r.tenants}</td><td>${c ? (c.slo_ok ? '<span class="chip ok">合格</span>' : '<span class="chip ng">不合格</span>') : '—'}</td><td>${c ? esc(c.bottleneck) : '—'}</td><td><button class="b" data-open="${esc(r.id)}">開く</button></td></tr>`; }).join('') || '<tr><td colspan="8" class="note">まだ実行がありません</td></tr>';
+}
+$('#hb').onclick = async e => { const id = e.target.dataset.open; if (!id) return; buildCharts(); $$('#nav button')[2].click(); await openRun(id); };
+
+
+// ---------- 追加機能 ----------
+function derive(pts) {
+  pts.forEach(p => {
+    const v = p.v, ps = Object.entries(v).filter(([k]) => k.startsWith('p95.') && !k.includes('batch')).map(([, x]) => x);
+    if (ps.length) v._p95 = Math.max(...ps);
+    const ls = Object.entries(v).filter(([k]) => k.startsWith('loops.')).map(([, x]) => x);
+    if (ls.length) v._loops = ls.reduce((a, b) => a + b, 0);
+    if (v['db.cpu_util'] != null) v._cpu = v['db.cpu_util'] * 100;
+  });
+  return pts;
+}
+function onHover() { redrawAll(); redrawCmp(); }
+
+// RTT 計測
+$('#probe').onclick = async () => {
+  try { await saveProject(); const r = await api('/api/probe', { method: 'POST', body: { n: 200 } }); const d = r.direct;
+    let t = `接続確立 ${fmt(d.connect_ms, 1)}ms ／ SELECT 1 の往復 p50 ${fmt(d.rtt_p50_ms, 3)}ms, p95 ${fmt(d.rtt_p95_ms, 3)}ms`;
+    if (r.simulated) t += ` ／ 演出（設定 ${r.simulated.configured_rtt_ms}ms）の計測 p50 ${fmt(r.simulated.measured.rtt_p50_ms, 3)}ms`;
+    $('#probeOut').innerHTML = esc(t) + ` <button class="b" id="probeSave">この RTT を試算に使う</button>`;
+    $('#probeSave').onclick = async () => { P = await api('/api/probe/save', { method: 'POST', body: { rtt_ms: d.rtt_p50_ms } }); fillForm(); toast('保存しました（試算に実測の RTT を使います）'); };
+  } catch (e) { $('#probeOut').textContent = e.message; }
+};
+
+// 取り込み
+$('#impDdlGo').onclick = async () => {
+  try { await saveProject(); const r = await api('/api/import/ddl', { method: 'POST', body: { ddl: $('#impDdl').value, apply: true } }); P = await api('/api/project'); fillForm();
+    $('#impDdlOut').innerHTML = `${r.tables.map(t => `${esc(t.name)}（親 ${esc(t.parent || 'なし')}、${t.columns} 列、${{ S: '小', M: '中', L: '大' }[t.size]}、${t.rows} 件）`).join(' → ')}<br>${r.warnings.map(w => `<span style="color:var(--warn)">・${esc(w)}</span>`).join('<br>')}`;
+  } catch (e) { $('#impDdlOut').textContent = e.message; }
+};
+async function importQ(source) {
+  try { await saveProject(); const w = $('#impWin').value;
+    const r = await api('/api/import/queries', { method: 'POST', body: { source, text: $('#impQ').value, window_secs: w ? +w : null, apply: true } }); P = await api('/api/project'); fillForm();
+    $('#impQOut').innerHTML = `${r.items.length} 件（集計期間 ${fmt(r.window_secs, 0)} 秒）: ` + r.items.slice(0, 8).map(i => `<code>${esc(i.name)}</code> ${fmt(i.calls, 0)} 回${i.write ? '（書き込み）' : ''}`).join('、');
+  } catch (e) { $('#impQOut').textContent = e.message; }
+}
+$('#impQText').onclick = () => importQ('text'); $('#impQDb').onclick = () => importQ('db');
+
+// 診断
+$('#diag').onclick = async () => {
+  $('#diagOut').innerHTML = '<span class="note">診断中…</span>';
+  try { await saveProject(); const [ex, li, st] = await Promise.all([api('/api/explain'), api('/api/lint'), api('/api/storage')]);
+    $('#diagOut').innerHTML = `<div class="msg ${st.fits ? 'o' : 'w'}">データ ${fmt(st.data_mb, 1)} MB ／ DB のメモリキャッシュ ${fmt(st.cache_mb, 0)} MB — ${esc(st.msg)}</div>
+    <div class="grid g2"><div><h3>EXPLAIN（全件走査の検出）</h3><div class="tw"><table><thead><tr><th>クエリ</th><th class="n">全件走査</th><th>判定</th></tr></thead><tbody>${ex.map(e => `<tr><td>${esc(e.query)}</td><td class="n">${e.error ? '—' : e.full_scans}</td><td style="color:${e.warn && e.full_scans && e.table_rows > 2000 ? 'var(--bad)' : 'var(--mut)'}">${esc(e.error || e.warn || 'インデックスを使っています')}</td></tr>`).join('')}</tbody></table></div></div>
+    <div><h3>lint（テナント条件・WHERE）</h3>${li.length ? li.map(l => `<div class="msg ${l.level === 'error' ? 'b' : l.level === 'warn' ? 'w' : 'o'}"><b>${esc(l.query)}</b>: ${esc(l.msg)}</div>`).join('') : '<div class="msg o">問題は見つかりませんでした</div>'}</div></div>`;
+  } catch (e) { $('#diagOut').innerHTML = `<div class="msg b">${esc(e.message)}</div>`; }
+};
+
+// 掃引・繰り返し
+$('#bSweep').onclick = async () => { await saveProject().catch(e => alert(e.message)); try { await api('/api/sweep', { method: 'POST', body: { tenants: $('#sw_ns').value.split(',').map(x => +x.trim()).filter(x => x > 0), ...secs() } }); pollJob(true); } catch (e) { alert(e.message); } };
+$('#bRepeat').onclick = async () => { await saveProject().catch(e => alert(e.message)); try { await api('/api/repeat', { method: 'POST', body: { n: +$('#rp_n').value, ...secs() } }); pollJob(true); } catch (e) { alert(e.message); } };
+function renderResult(x) {
+  if (x.kind === 'sweep') {
+    return `<div class="card"><h3 style="margin-top:0">テナント数の掃引（各 ${x.secs} 秒）</h3><div class="tw"><table><thead><tr><th class="n">テナント</th><th class="n">クエリ/秒</th><th class="n">CPU（vCPU）</th><th class="n">使用率</th><th class="n">p95 (ms)</th><th class="n">エラー</th><th class="n">見送り</th><th>判定</th><th>最初に詰まった所</th></tr></thead><tbody>
+    ${x.points.map(q => `<tr><td class="n">${q.tenants}</td><td class="n">${fmt(q.qps, 0)}</td><td class="n">${fmt(q.cpu_cores, 2)}</td><td class="n">${q.util == null ? '—' : fmt(q.util * 100, 0) + '%'}</td><td class="n">${fmt(q.worst_p95_ms, 1)}</td><td class="n">${q.errors}</td><td class="n">${q.dropped}</td><td>${q.slo_ok ? '<span class="chip ok">合格</span>' : '<span class="chip ng">不合格</span>'}</td><td>${esc(q.bottleneck)}</td></tr>`).join('')}</tbody></table></div>
+    <p><b>膝（最初に崩れる点）:</b> ${x.knee ? x.knee + ' テナント' : 'この範囲では見つかりませんでした'}　<b>安全上限（使用率 ${Math.round(x.safe_util * 100)}% 以内で合格した最大）:</b> ${x.safe_tenants ?? '—'}${x.generator_limit ? `　<span style="color:var(--warn)">※ ${x.generator_limit} テナント以降は負荷側が先に限界です（測定として信用できません）</span>` : ''}</p></div>`;
+  }
+  const rows = Object.entries(x.stats).map(([k, v]) => `<tr><td>${esc({ worst_p95_ms: 'p95（ms）', cpu_cores: 'DB の CPU（vCPU）', qps: 'クエリ / 秒', errors: 'エラー' }[k] || k)}</td><td class="n">${fmt(v.mean, 2)}</td><td class="n">± ${fmt(v.stdev, 2)}</td><td class="n">${fmt(v.cv_pct, 1)}%</td><td class="n">${fmt(v.min, 2)} 〜 ${fmt(v.max, 2)}</td></tr>`).join('');
+  return `<div class="card"><h3 style="margin-top:0">${x.n} 回の繰り返し（各 ${x.secs} 秒）</h3><div class="tw"><table><thead><tr><th>指標</th><th class="n">平均</th><th class="n">標準偏差</th><th class="n">ばらつき(CV)</th><th class="n">範囲</th></tr></thead><tbody>${rows}</tbody></table></div><p class="note">ばらつき（CV）が大きい指標は、1 回の測定では信用できません。</p></div>`;
+}
+async function loadResults() {
+  const rs = await api('/api/results'); $('#resList').innerHTML = rs.length ? rs.map(renderResult).join('') : 'まだありません';
+  const last = rs[0]; if (last) $('#results').innerHTML = renderResult(last);
+}
+function renderExtras(r) {
+  const s = r.summary, q = s.queries;
+  const qrows = Object.entries(q).filter(([k]) => k !== '(retry)').map(([k, v]) => `<tr><td>${esc(k)}</td><td class="n">${fmt(v.qps, 1)}</td><td class="n">${fmt(v.p50_ms, 2)}</td><td class="n">${fmt(v.p95_ms, 2)}</td><td class="n" style="${v.wait_p95_ms > 10 ? 'color:var(--bad);font-weight:600' : ''}">${fmt(v.wait_p50_ms, 1)}</td><td class="n" style="${v.wait_p95_ms > 10 ? 'color:var(--bad);font-weight:600' : ''}">${fmt(v.wait_p95_ms, 1)}</td><td class="n">${fmt(v.avg_rows, 1)}</td></tr>`).join('');
+  const pts = (L.points || []).filter(p => p.t >= (r.opts?.warmup || 0)); const mx = k => Math.max(0, ...pts.map(p => p.v[k] || 0));
+  const proxy = mx('proxy.clients') > 0 ? `<div class="msg o"><b>接続の 3 層（計測中の最大）:</b> アプリ → Proxy ${fmt(mx('proxy.clients'), 0)} ／ Proxy → DB（実行中 ${fmt(mx('proxy.sv_active'), 0)}・待機 ${fmt(mx('proxy.sv_idle'), 0)}）／ Proxy で待機 ${fmt(mx('proxy.cl_waiting'), 0)} ／ DB 側の接続 ${fmt(mx('db.conns'), 0)}</div>` : '';
+  $('#extras').innerHTML = `<div class="card"><h3 style="margin-top:0">クエリ別（実行時間と接続プールの待ちを分けて表示）</h3>${proxy}<div class="tw"><table><thead><tr><th>クエリ</th><th class="n">qps</th><th class="n">実行 p50 (ms)</th><th class="n">実行 p95 (ms)</th><th class="n">プール待ち p50</th><th class="n">プール待ち p95</th><th class="n">平均行数</th></tr></thead><tbody>${qrows}</tbody></table></div>
+  <p class="note">実行 = DB の処理 + 往復。プール待ち = 接続を借りるまでの待ち。プール待ちが大きく実行が小さいときは、接続プール（または負荷側）が先に詰まっています。</p>
+  <details><summary>外部のメトリクス（CloudWatch・Datadog など）を取り込む</summary><div class="row" style="margin-top:6px"><label>名前<select id="exName"><option value="db.cpu_pct">db.cpu_pct（CPU 使用率 0〜100）</option><option value="db.cpu_util">db.cpu_util（CPU 使用率 0〜1）</option><option value="custom">任意の名前</option></select></label><label>任意の名前<input id="exCustom" placeholder="例 aurora.read_iops"></label></div>
+  <textarea id="exCsv" style="min-height:80px;margin-top:6px" placeholder="時刻,値&#10;0,31&#10;1,32&#10;（時刻は実行開始からの秒 または UNIX 秒）"></textarea><div class="row" style="margin-top:6px"><button class="b" id="exGo">取り込む</button><span id="exOut" class="note"></span></div></details></div>`;
+  $('#exGo').onclick = async () => { try { const nm = $('#exName').value === 'custom' ? $('#exCustom').value.trim() : $('#exName').value; const a = await api(`/api/runs/${r.id}/import_metrics`, { method: 'POST', body: { name: nm, csv: $('#exCsv').value } }); $('#exOut').textContent = `${a.attached_points} 点を取り込みました`; await openRun(r.id); } catch (e) { $('#exOut').textContent = e.message; } };
+}
+
+// 2 つの実行の重ね合わせ
+let cmpChart = null, cmpPts = [];
+$('#hb').addEventListener('change', e => { if (!e.target.dataset.cmp) return; const n = $$('#hb input[type=checkbox]:checked').length; $('#cmpGo').disabled = n !== 2; $('#cmpHint').textContent = n === 2 ? '' : '下の表で 2 つにチェックを入れてください'; });
+$('#cmpGo').onclick = async () => {
+  const ids = $$('#hb input[type=checkbox]:checked').map(x => x.dataset.cmp); if (ids.length !== 2) return;
+  const runs = await Promise.all(ids.map(id => api(`/api/runs/${id}`))); const key = $('#cmpMetric').value;
+  const toMap = r => { const m = new Map(); derive(r.series || []).forEach(p => { if (p.v[key] != null) m.set(Math.round(p.t), p.v[key]); }); return m; };
+  const [A, B] = runs.map(toMap); const ts = [...new Set([...A.keys(), ...B.keys()])].sort((a, b) => a - b);
+  cmpPts = ts.map(t => ({ t, v: { ['A: ' + ids[0]]: A.get(t), ['B: ' + ids[1]]: B.get(t) } }));
+  $('#cmpChart').innerHTML = ''; cmpChart = new Chart($('#cmpMetric').selectedOptions[0].text, { match: k => k.startsWith('A: ') || k.startsWith('B: '), label: k => k });
+  $('#cmpChart').appendChild(cmpChart.el); redrawCmp();
+  const sum = runs.map((r, i) => `${'AB'[i]}: ${r.engine}・${r.tenants} テナント・${r.vcpu} vCPU・${r.summary ? esc(r.summary.conclusion.verdict.slice(0, 24)) : '—'}`).join(' ／ '); $('#cmpHint').innerHTML = sum;
+};
+function redrawCmp() { if (cmpChart) { cmpPts.forEach(p => Object.keys(p.v).forEach(k => { if (p.v[k] == null) delete p.v[k]; })); cmpChart.draw(cmpPts, []); } }
+
+// ---------- 起動 ----------
+(async () => {
+  P = await api('/api/project'); fillForm(); buildCharts(); loadDoctor();
+  const j = await api('/api/job'); if (j.running) pollJob();
+})();
+</script>
+</body>
+</html>
