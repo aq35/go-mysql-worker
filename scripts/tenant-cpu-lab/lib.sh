@@ -58,3 +58,19 @@ INSERT INTO b SELECT t,i,i%100 FROM generate_series($from,$to) t, generate_serie
 ANALYZE;
 SQL
 }
+
+# my_start <name> <port> <cpu_millis>  — MySQL 8.0 を cgroup の CPU 上限つきで起動する（root 不要の mysql ユーザで実行）
+my_start() {
+  local name=$1 port=$2 millis=$3; local dir=$ROOT/$name
+  mkdir -p "$ROOT"; chown mysql:mysql "$ROOT" 2>/dev/null || true
+  rm -rf "$dir"; mkdir -p "$dir"; chown mysql:mysql "$dir"
+  su mysql -s /bin/bash -c "mysqld --no-defaults --initialize-insecure --datadir=$dir >$ROOT/$name.init.log 2>&1"
+  mkdir -p "$CG/$name" "$CA/$name"; echo $((millis*100)) > "$CG/$name/cpu.cfs_quota_us"
+  su mysql -s /bin/bash -c "taskset -c $DB_CORES mysqld --no-defaults --datadir=$dir --port=$port --bind-address=127.0.0.1 --socket=$ROOT/$name.sock --mysqlx=OFF --max-connections=300 --innodb-buffer-pool-size=256M --innodb-flush-log-at-trx-commit=1 --skip-log-bin --pid-file=$ROOT/$name.pid --log-error=$ROOT/$name.err >/dev/null 2>&1 &"
+  for _ in $(seq 1 60); do mysqladmin -h127.0.0.1 -P$port -uroot ping >/dev/null 2>&1 && break; sleep 1; done
+  local pm; pm=$(cat "$ROOT/$name.pid")
+  echo "$pm" > "$CG/$name/cgroup.procs"; echo "$pm" > "$CA/$name/cgroup.procs"
+  for t in $(ls /proc/$pm/task); do echo "$t" > "$CG/$name/cgroup.procs" 2>/dev/null || true; echo "$t" > "$CA/$name/cgroup.procs" 2>/dev/null || true; done
+  mysql -h127.0.0.1 -P$port -uroot -e "CREATE DATABASE IF NOT EXISTS caplab_lab; CREATE USER IF NOT EXISTS 'cap'@'%' IDENTIFIED WITH mysql_native_password BY 'cap'; GRANT ALL ON *.* TO 'cap'@'%'; FLUSH PRIVILEGES;"
+}
+my_stop() { mysqladmin -h127.0.0.1 -P$2 -uroot shutdown 2>/dev/null || true; sleep 1; rmdir "$CG/$1" "$CA/$1" 2>/dev/null || true; }

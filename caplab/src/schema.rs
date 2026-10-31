@@ -411,6 +411,20 @@ pub struct Simple {
     pub auth_cache_hit: f64,
     pub batch: bool,
     pub stagger: bool,
+    /// SSE の一斉接続: 1 テナントあたりの接続数（None / 0 で作らない）
+    #[serde(default)]
+    pub sse_conns: Option<u32>,
+    #[serde(default)]
+    pub sse_singleflight: bool,
+    /// Web の負荷の形: "spike"（途中で 5 倍）| "ramp"（0.2 倍から 2.5 倍へ）
+    #[serde(default)]
+    pub web_shape: Option<String>,
+    /// テナントの偏り（Zipf の指数。0 で一様）
+    #[serde(default)]
+    pub web_skew: Option<f64>,
+    /// 実行中の接続の強制切断を、計測開始から何秒で起こすか
+    #[serde(default)]
+    pub chaos_kill_at: Option<f64>,
 }
 
 fn flow_steps(p: &Project, flow: &str) -> Vec<Step> {
@@ -467,6 +481,12 @@ pub fn apply_simple(p: &mut Project, s: &Simple) {
             concurrency: None,
             tenant_limit: None,
             pool_max_open: 10,
+            target: Target::Writer,
+ tenant_skew: None,
+ shape: None,
+ hot_rows: None,
+ connections_per_tenant: None,
+ singleflight: false,
             tx: false,
             steps: flow_steps(p, "nplus1"),
         });
@@ -482,6 +502,7 @@ pub fn apply_simple(p: &mut Project, s: &Simple) {
             cache_hit: Some(s.auth_cache_hit),
         }];
         steps.extend(flow_steps(p, &s.web_flow));
+        let web_start = p.actors.len();
         p.actors.push(Actor {
             name: "web-api".into(),
             kind: Kind::Web,
@@ -492,6 +513,16 @@ pub fn apply_simple(p: &mut Project, s: &Simple) {
             concurrency: None,
             tenant_limit: None,
             pool_max_open: 20,
+            target: Target::Writer,
+ tenant_skew: s.web_skew.filter(|x| *x > 0.0),
+ shape: match s.web_shape.as_deref() {
+                Some("spike") => Some(Shape::Spike { at_s: 8.0, factor: 5.0, dur_s: 6.0 }),
+                Some("ramp") => Some(Shape::Ramp { from: 0.2, to: 2.5 }),
+                _ => None,
+            },
+ hot_rows: None,
+ connections_per_tenant: None,
+ singleflight: false,
             tx: false,
             steps,
         });
@@ -507,6 +538,12 @@ pub fn apply_simple(p: &mut Project, s: &Simple) {
             concurrency: Some(1),
             tenant_limit: Some(50),
             pool_max_open: 2,
+            target: Target::Writer,
+ tenant_skew: None,
+ shape: None,
+ hot_rows: None,
+ connections_per_tenant: None,
+ singleflight: false,
             tx: false,
             steps: vec![Step {
                 id: None,
@@ -518,4 +555,31 @@ pub fn apply_simple(p: &mut Project, s: &Simple) {
             }],
         });
     }
+    if let Some(n) = s.sse_conns.filter(|n| *n > 0) {
+        let steps = flow_steps(p, "nplus1");
+        let first: Vec<Step> = steps.into_iter().take(2).collect();
+        p.actors.push(Actor {
+            name: "sse-connect".into(),
+            kind: Kind::Sse,
+            every_ms: None,
+            instances: 1,
+            qps_per_tenant: None,
+            stagger: false,
+            concurrency: None,
+            tenant_limit: None,
+            pool_max_open: 10,
+            target: Target::Writer,
+            tenant_skew: None,
+            shape: None,
+            hot_rows: None,
+            connections_per_tenant: Some(n),
+            singleflight: s.sse_singleflight,
+            tx: false,
+            steps: first,
+        });
+    }
+    p.chaos = match s.chaos_kill_at.filter(|t| *t >= 0.0) {
+        Some(t) => vec![Chaos { at_s: t, action: ChaosAction::KillConnections }],
+        None => vec![],
+    };
 }

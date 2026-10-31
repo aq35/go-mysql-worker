@@ -48,6 +48,9 @@ pub struct Estimate {
     pub safe_tenants_high: f64,
     pub uncalibrated: Vec<String>,
     pub warnings: Vec<String>,
+    /// 単価が設定されているときの月額（730 時間）と、安全上限でのテナントあたりの月額
+    pub monthly_cost: Option<f64>,
+    pub cost_per_tenant_safe: Option<f64>,
 }
 
 fn default_rows(p: &Project, q: &str) -> f64 {
@@ -82,7 +85,7 @@ pub fn estimate(p: &Project, calib: &Calib, tenants: u32) -> Estimate {
     };
     let mut qps: BTreeMap<String, f64> = BTreeMap::new();
     let mut fixed_qps: BTreeMap<String, f64> = BTreeMap::new(); // テナント数に比例しない分（バッチ）
-    let rtt = p.profile.rtt_ms;
+    let rtt = p.profile.measured_rtt_ms.unwrap_or(p.profile.rtt_ms);
     let lat_ms = |q: &str| calib.p50_ms.get(q).copied().unwrap_or(1.0) + rtt;
 
     for a in &p.actors {
@@ -93,6 +96,14 @@ pub fn estimate(p: &Project, calib: &Calib, tenants: u32) -> Estimate {
                 true,
             ),
             Kind::Web => (tenants as f64 * a.qps_per_tenant.unwrap_or(0.0), true),
+            Kind::Sse => match a.every_ms {
+                Some(ev) => (n_t * a.connections_per_tenant.unwrap_or(1) as f64 * if a.singleflight { 1.0 / a.connections_per_tenant.unwrap_or(1) as f64 } else { 1.0 } * 1000.0 / ev.max(1) as f64, true),
+                None => {
+                    let burst = n_t * if a.singleflight { 1.0 } else { a.connections_per_tenant.unwrap_or(1) as f64 };
+                    e.warnings.push(format!("SSE '{}' は 1 回きりの一斉接続です（{burst:.0} ループが一度に走る。定常の頻度には含めません。実測で p99 とプール待ちを確認）", a.name));
+                    (0.0, false)
+                }
+            },
             Kind::Batch => match a.every_ms {
                 Some(ev) => (
                     a.concurrency.unwrap_or(1) as f64 * 1000.0 / ev.max(1) as f64,
@@ -223,6 +234,13 @@ pub fn estimate(p: &Project, calib: &Calib, tenants: u32) -> Estimate {
     e.safe_tenants = safe(cpu, (fixed_cpu_lo + fixed_cpu_hi) / 2.0);
     e.safe_tenants_low = safe(hi, fixed_cpu_hi); // CPU が重い側 → 上限は小さい
     e.safe_tenants_high = safe(lo, fixed_cpu_lo);
+    if let Some(pr) = p.profile.price_per_vcpu_hour {
+        let mc = p.profile.vcpu * pr * 730.0;
+        e.monthly_cost = Some(mc);
+        if e.safe_tenants.is_finite() && e.safe_tenants > 0.0 {
+            e.cost_per_tenant_safe = Some(mc / e.safe_tenants);
+        }
+    }
     if !e.uncalibrated.is_empty() {
         e.warnings.push(format!("{} 個のクエリが未校正です。仮置き（{DEFAULT_MS_LOW}〜{DEFAULT_MS_HIGH} ms/回、EXP-65 の実測の幅）で幅を出しています。「校正」を実行すると実測に置き換わります", e.uncalibrated.len()));
     }
@@ -268,6 +286,12 @@ mod tests {
             concurrency: None,
             tenant_limit: None,
             pool_max_open: 10,
+            target: Target::Writer,
+ tenant_skew: None,
+ shape: None,
+ hot_rows: None,
+ connections_per_tenant: None,
+ singleflight: false,
             tx: false,
             steps: vec![Step {
                 id: None,
@@ -380,6 +404,12 @@ mod tests {
             concurrency: None,
             tenant_limit: None,
             pool_max_open: 10,
+            target: Target::Writer,
+ tenant_skew: None,
+ shape: None,
+ hot_rows: None,
+ connections_per_tenant: None,
+ singleflight: false,
             tx: false,
             steps: vec![Step {
                 id: None,

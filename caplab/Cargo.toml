@@ -6,11 +6,16 @@ description = "DB capacity lab: register schema, queries and frequencies; estima
 
 [dependencies]
 anyhow = "1"
+sqlparser = "0.53"
 async-trait = "0.1"
 axum = "0.7"
 futures = "0.3"
 hdrhistogram = "7"
-mysql_async = { version = "0.34", default-features = false, features = ["minimal"] }
+mysql_async = { version = "0.34", default-features = false, features = ["minimal", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+tokio-postgres-rustls = "0.12"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

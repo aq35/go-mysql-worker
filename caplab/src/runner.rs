@@ -155,7 +155,10 @@ struct QAcc {
     count: u64,
     errors: u64,
     rows: u64,
+    /// DB の実行時間（接続プールの待ちを除く。ネットワーク往復を含む）
     exec: Option<Histogram<u64>>,
+    /// 接続プールで待った時間
+    wait: Option<Histogram<u64>>,
 }
 #[derive(Default)]
 struct Acc {
@@ -230,31 +233,30 @@ impl Metrics {
 pub struct Ctx {
     pub project: Project,
     pub engine: Engine,
+    pub reader: Option<Engine>,
     pub metrics: Arc<Metrics>,
     pub stop: Arc<Stop>,
     pub rows: BTreeMap<String, u64>,
     pub pools: HashMap<String, Arc<Pool>>,
     pub started: Instant,
     pub warmup: Duration,
+    pub total_secs: f64,
+    /// 直近の負荷倍率（f64 のビット）
+    pub load_mult: AtomicU64,
 }
 
-fn resolve(
-    sql: &str,
-    tenant: u32,
-    tenants: u32,
-    rows: &BTreeMap<String, u64>,
-    bind: &HashMap<String, i64>,
-) -> String {
+/// プレースホルダの値を決める。`bound` が Some のときは、プリペア用に `$n` / `?` へ置き換えて値の列を返す。
+pub fn render(sql: &str, tenant: u32, tenants: u32, rows: &BTreeMap<String, u64>, bind: &HashMap<String, i64>, bound: Option<EngineKind>) -> (String, Vec<i32>) {
     let b = sql.as_bytes();
     let mut out = String::with_capacity(sql.len() + 16);
+    let mut params: Vec<i32> = vec![];
     let mut rng = rand::thread_rng();
     let mut i = 0;
     while i < b.len() {
         let c = b[i] as char;
         let prev_colon = i > 0 && b[i - 1] == b':';
-        let next_ident =
-            i + 1 < b.len() && ((b[i + 1] as char).is_ascii_lowercase() || b[i + 1] == b'_');
-        if c == ':' && !prev_colon && next_ident && !(i + 1 < b.len() && b[i + 1] == b':') {
+        let next_ident = i + 1 < b.len() && ((b[i + 1] as char).is_ascii_lowercase() || b[i + 1] == b'_');
+        if c == ':' && !prev_colon && next_ident {
             let mut j = i + 1;
             while j < b.len() && ((b[j] as char).is_ascii_alphanumeric() || b[j] == b'_') {
                 j += 1;
@@ -262,28 +264,60 @@ fn resolve(
             let name = &sql[i + 1..j];
             let v: i64 = if name == "tenant" {
                 tenant as i64
+            } else if name == "rand_any" {
+                rng.gen_range(1..=1000) as i64 // 取り込んだクエリの値（本来の値は不明なので 1〜1000 の乱数）
             } else if name == "tenant_hi" {
                 (tenant + 49).min(tenants) as i64
             } else if let Some(t) = name.strip_prefix("rand_") {
-                rng.gen_range(1..=rows.get(t).copied().unwrap_or(1).max(1)) as i64
+                let mut upper = rows.get(t).copied().unwrap_or(1).max(1);
+                if let Some(h) = bind.get("__hot") {
+                    upper = upper.min((*h).max(1) as u64); // ホットロウ: 先頭の K 件に集中
+                }
+                rng.gen_range(1..=upper) as i64
             } else {
                 bind.get(name).copied().unwrap_or(1)
             };
-            out.push_str(&v.to_string());
+            match bound {
+                None => out.push_str(&v.to_string()),
+                Some(k) => {
+                    params.push(v as i32);
+                    match k {
+                        EngineKind::Postgres => out.push_str(&format!("${}::integer", params.len())),
+                        EngineKind::Mysql => out.push('?'),
+                    }
+                }
+            }
             i = j;
         } else {
             out.push(c);
             i += 1;
         }
     }
-    out
+    (out, params)
+}
+
+/// プロジェクトの protocol に従って 1 クエリを実行する
+pub async fn run_sql(conn: &mut dyn Conn, p: &Project, sql: &str, tenant: u32, rows: &BTreeMap<String, u64>, bind: &HashMap<String, i64>) -> anyhow::Result<crate::engine::RunRes> {
+    match p.protocol {
+        Protocol::Text => {
+            let (s, _) = render(sql, tenant, p.tenants, rows, bind, None);
+            conn.exec(&s).await
+        }
+        Protocol::Prepared | Protocol::PreparedEach => {
+            let (s, params) = render(sql, tenant, p.tenants, rows, bind, Some(p.engine));
+            conn.exec_params(&s, &params, p.protocol == Protocol::Prepared).await
+        }
+    }
 }
 
 async fn run_loop(ctx: Arc<Ctx>, actor: Arc<Actor>, tenant: u32, scheduled: Instant) {
     let pool = ctx.pools[&actor.name].clone();
-    let rtt = ctx.project.profile.rtt_ms;
+    let rtt = if ctx.project.profile.net_mode == NetMode::Sleep { ctx.project.profile.rtt_ms } else { 0.0 };
     let mut results: HashMap<String, Vec<i64>> = HashMap::new();
     let mut bind: HashMap<String, i64> = HashMap::new();
+    if let Some(h) = actor.hot_rows {
+        bind.insert("__hot".into(), h as i64);
+    }
     let mut failed = false;
     let mut held: Option<Guard> = None;
     if actor.tx {
@@ -338,35 +372,53 @@ async fn run_loop(ctx: Arc<Ctx>, actor: Arc<Actor>, tenant: u32, scheduled: Inst
             if let (Some(f), Some(id)) = (&step.foreach, r) {
                 bind.insert(f.clone(), id);
             }
-            let sql = resolve(&q.sql, tenant, ctx.project.tenants, &ctx.rows, &bind);
-            let t = Instant::now();
+            let mut wait_t = Duration::ZERO;
+            let mut exec_t = Duration::ZERO;
             let res = if let Some(g) = held.as_mut() {
-                g.conn().exec(&sql).await
+                let t = Instant::now();
+                let r = run_sql(g.conn(), &ctx.project, &q.sql, tenant, &ctx.rows, &bind).await;
+                exec_t = t.elapsed();
+                r
             } else {
-                match pool.get().await {
-                    Ok(mut g) => {
-                        let r = g.conn().exec(&sql).await;
-                        if r.is_err() {
-                            g.broken = true;
+                let mut attempt = 0;
+                loop {
+                    let tw = Instant::now();
+                    let got = pool.get().await;
+                    wait_t += tw.elapsed();
+                    let r = match got {
+                        Ok(mut g) => {
+                            let te = Instant::now();
+                            let r = run_sql(g.conn(), &ctx.project, &q.sql, tenant, &ctx.rows, &bind).await;
+                            exec_t += te.elapsed();
+                            if r.is_err() {
+                                g.broken = true; // 壊れた接続はプールに戻さない
+                            }
+                            if rtt > 0.0 {
+                                tokio::time::sleep(Duration::from_secs_f64(rtt / 1000.0)).await;
+                            }
+                            r
                         }
-                        if rtt > 0.0 {
-                            tokio::time::sleep(Duration::from_secs_f64(rtt / 1000.0)).await;
-                        }
-                        r
+                        Err(e) => Err(e),
+                    };
+                    if r.is_err() && ctx.project.retry_conn && attempt < 3 {
+                        attempt += 1;
+                        ctx.metrics.query("(retry)", |a| a.count += 1);
+                        continue; // 新しい接続で 1 回だけやり直す
                     }
-                    Err(e) => Err(e),
+                    break r;
                 }
             };
             if held.is_some() && rtt > 0.0 {
                 tokio::time::sleep(Duration::from_secs_f64(rtt / 1000.0)).await;
             }
-            let el = t.elapsed();
+            let el = exec_t;
             match res {
                 Ok(rr) => {
                     ctx.metrics.query(&step.query, |a| {
                         a.count += 1;
                         a.rows += rr.rows;
                         rec(a.exec.get_or_insert_with(hist), el);
+                        rec(a.wait.get_or_insert_with(hist), wait_t);
                     });
                     if let Some(id) = &step.id {
                         results.insert(id.clone(), rr.ids.clone());
@@ -461,19 +513,53 @@ async fn drive_actor(ctx: Arc<Ctx>, actor: Arc<Actor>) {
             }
         }
         Kind::Web => {
-            let rate = tenants as f64 * actor.qps_per_tenant.unwrap_or(1.0);
+            let base = tenants as f64 * actor.qps_per_tenant.unwrap_or(1.0);
+            let zipf = actor.tenant_skew.filter(|s| *s > 0.0).map(|s| Zipf::new(tenants, s));
             let mut next = Instant::now();
             while !ctx.stop.is_set() {
                 nap_until(&ctx.stop, next).await;
                 let now = Instant::now();
                 let mut guard = 0;
                 while next <= now && guard < 5000 {
-                    let tenant = rand::thread_rng().gen_range(1..=tenants);
+                    let tenant = pick_tenant(&zipf, tenants);
                     ctx.metrics.lateness(now.saturating_duration_since(next));
                     spawn_loop(&ctx, &actor, &inflight, tenant, next);
+                    // 負荷倍率（計測開始からの秒。ウォームアップ中は 0 秒として扱う）
+                    let t = (now.saturating_duration_since(ctx.started).as_secs_f64() - ctx.warmup.as_secs_f64()).max(0.0);
+                    let mult = actor.shape.as_ref().map(|s| s.mult(t, ctx.total_secs)).unwrap_or(1.0).max(0.01);
+                    ctx.load_mult.store(mult.to_bits(), Ordering::Relaxed);
                     let u: f64 = rand::thread_rng().gen::<f64>().max(1e-12);
-                    next += Duration::from_secs_f64(-u.ln() / rate);
+                    next += Duration::from_secs_f64(-u.ln() / (base * mult).max(1e-6));
                     guard += 1;
+                }
+            }
+        }
+        Kind::Sse => {
+            // 一斉接続: 初期スナップショットを全接続が取りに来る。every_ms があれば再接続の嵐を繰り返す
+            let conns = actor.connections_per_tenant.unwrap_or(1).max(1);
+            let period = actor.every_ms.map(|e| Duration::from_millis(e.max(1)));
+            let big = Arc::new(Semaphore::new(100_000));
+            let mut k = 0u32;
+            loop {
+                let at = ctx.started + ctx.warmup + Duration::from_millis(1000) + period.unwrap_or(Duration::ZERO) * k;
+                nap_until(&ctx.stop, at).await;
+                if ctx.stop.is_set() {
+                    break;
+                }
+                for tenant in 1..=tenants {
+                    // singleflight: テナントごとに 1 回だけ DB を引き、残りの接続は同じ結果を使う
+                    let n = if actor.singleflight { 1 } else { conns };
+                    for _ in 0..n {
+                        ctx.metrics.lateness(Instant::now().saturating_duration_since(at));
+                        spawn_loop(&ctx, &actor, &big, tenant, at);
+                    }
+                    if actor.singleflight && conns > 1 {
+                        ctx.metrics.acc.lock().unwrap().cache_skips += (conns - 1) as u64;
+                    }
+                }
+                k += 1;
+                if period.is_none() {
+                    break;
                 }
             }
         }
@@ -482,6 +568,7 @@ async fn drive_actor(ctx: Arc<Ctx>, actor: Arc<Actor>) {
             match actor.every_ms {
                 Some(every) => {
                     let period = Duration::from_millis(every.max(1));
+                    let zipf = actor.tenant_skew.filter(|s| *s > 0.0).map(|s| Zipf::new(tenants, s));
                     let mut k = 0u32;
                     while !ctx.stop.is_set() {
                         let at =
@@ -491,7 +578,7 @@ async fn drive_actor(ctx: Arc<Ctx>, actor: Arc<Actor>) {
                             break;
                         }
                         for _ in 0..conc {
-                            let tenant = rand::thread_rng().gen_range(1..=tenants);
+                            let tenant = pick_tenant(&zipf, tenants);
                             spawn_loop(&ctx, &actor, &inflight, tenant, at);
                         }
                         k += 1;
@@ -514,6 +601,34 @@ async fn drive_actor(ctx: Arc<Ctx>, actor: Arc<Actor>) {
                 }
             }
         }
+    }
+}
+
+// ---------------- テナントの選び方（Zipf） ----------------
+struct Zipf {
+    cdf: Vec<f64>,
+}
+impl Zipf {
+    fn new(n: u32, s: f64) -> Zipf {
+        let mut acc = 0.0;
+        let mut cdf = Vec::with_capacity(n as usize);
+        for k in 1..=n.max(1) {
+            acc += 1.0 / (k as f64).powf(s);
+            cdf.push(acc);
+        }
+        let t = acc;
+        cdf.iter_mut().for_each(|x| *x /= t);
+        Zipf { cdf }
+    }
+    fn sample(&self) -> u32 {
+        let u: f64 = rand::thread_rng().gen();
+        (self.cdf.partition_point(|&c| c < u) as u32 + 1).min(self.cdf.len() as u32)
+    }
+}
+fn pick_tenant(z: &Option<Zipf>, n: u32) -> u32 {
+    match z {
+        Some(z) => z.sample(),
+        None => rand::thread_rng().gen_range(1..=n),
     }
 }
 
@@ -558,6 +673,7 @@ pub struct RunOpts {
 pub async fn execute(
     project: Project,
     engine: Engine,
+    reader: Option<Engine>,
     cpu_src: CpuSrc,
     opts: RunOpts,
     metrics: Arc<Metrics>,
@@ -567,18 +683,22 @@ pub async fn execute(
     let rows = schema::rows_per_tenant(&project);
     let mut pools = HashMap::new();
     for a in &project.actors {
-        pools.insert(a.name.clone(), Pool::new(engine.clone(), a.pool_max_open));
+        let eng = if a.target == Target::Reader { reader.clone().unwrap_or_else(|| engine.clone()) } else { engine.clone() };
+        pools.insert(a.name.clone(), Pool::new(eng, a.pool_max_open));
     }
     let started = Instant::now();
     let ctx = Arc::new(Ctx {
         project: project.clone(),
         engine: engine.clone(),
+        reader: reader.clone(),
         metrics: metrics.clone(),
         stop: stop.clone(),
         rows,
         pools,
         started,
         warmup: Duration::from_secs(opts.warmup_secs),
+        total_secs: opts.secs as f64,
+        load_mult: AtomicU64::new(1.0f64.to_bits()),
     });
     let ev = |s: &str| {
         events
@@ -593,10 +713,12 @@ pub async fn execute(
         let ctx = ctx.clone();
         let cpu_src = cpu_src.clone();
         tokio::spawn(async move {
-            let mut sc = ctx.engine.connect().await.ok();
+            let mut sc = ctx.engine.connect_direct().await.ok();
             let mut last_cpu = cpu_src.read();
             let mut last_self = cpu::self_cpu();
             let mut last_snap: BTreeMap<String, f64> = BTreeMap::new();
+            let mut last_opened = 0u64;
+            let mut pobs = ctx.project.proxy.clone().map(crate::proxy::ProxyObserver::new);
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.tick().await;
             while !ctx.stop.is_set() {
@@ -628,6 +750,9 @@ pub async fn execute(
                         if let Some(h) = &q.exec {
                             v.insert(format!("q.{name}.p95"), ms(h, 0.95));
                         }
+                        if let Some(h) = &q.wait {
+                            v.insert(format!("q.{name}.wait_p95"), ms(h, 0.95));
+                        }
                         *q = QAcc::default();
                     }
                     let (te, td) = (
@@ -653,8 +778,17 @@ pub async fn execute(
                     pool_wait += w;
                 }
                 v.insert("pool.waiting".into(), pool_wait);
+                v.insert("load.mult".into(), f64::from_bits(ctx.load_mult.load(Ordering::Relaxed)));
+                if sc.is_none() {
+                    sc = ctx.engine.connect_direct().await.ok();
+                }
+                let mut snap_failed = false;
                 if let Some(c) = sc.as_mut() {
-                    if let Ok(snap) = ctx.engine.snapshot(c.as_mut()).await {
+                    let snap_r = ctx.engine.snapshot(c.as_mut()).await;
+                    if snap_r.is_err() {
+                        snap_failed = true;
+                    }
+                    if let Ok(snap) = snap_r {
                         for k in ["db.conns", "db.active"] {
                             if let Some(x) = snap.get(k) {
                                 v.insert(k.into(), *x);
@@ -671,9 +805,21 @@ pub async fn execute(
                         if h + r > 0.0 {
                             v.insert("db.cache_hit".into(), h / (h + r));
                         }
+                        v.insert("db.disk_reads".into(), r.max(0.0));
                         v.insert("db.rows_read".into(), d("db.rows_read"));
                         v.insert("db.lock_waits".into(), d("db.lock_waits"));
                         last_snap = snap;
+                    }
+                }
+                if snap_failed {
+                    sc = None; // 切断された。次の周期で張り直す
+                }
+                let opened: u64 = ctx.pools.values().map(|p| p.opened.load(Ordering::Relaxed)).sum();
+                v.insert("pool.reconnects".into(), opened.saturating_sub(last_opened) as f64);
+                last_opened = opened;
+                if let Some(po) = pobs.as_mut() {
+                    if let Ok(pm) = po.sample().await {
+                        v.extend(pm);
                     }
                 }
                 let now_cpu = cpu_src.read();
@@ -684,6 +830,7 @@ pub async fn execute(
                 }
                 last_cpu = now_cpu;
                 let s = cpu::self_cpu();
+                v.insert("gen.rss_mb".into(), cpu::self_rss_mb());
                 v.insert("gen.cpu_cores".into(), (s - last_self).max(0.0));
                 last_self = s;
                 let pt = Point {
@@ -696,6 +843,24 @@ pub async fn execute(
         })
     };
 
+    // 障害注入
+    let mut chaos_hs = vec![];
+    for ch in project.chaos.clone() {
+        let (ctx, events) = (ctx.clone(), events.clone());
+        chaos_hs.push(tokio::spawn(async move {
+            let at = ctx.started + Duration::from_secs(ctx.warmup.as_secs()) + Duration::from_secs_f64(ch.at_s.max(0.0));
+            nap_until(&ctx.stop, at).await;
+            if ctx.stop.is_set() {
+                return;
+            }
+            let ChaosAction::KillConnections = ch.action;
+            let msg = match ctx.engine.kill_connections().await {
+                Ok(n) => format!("切断 {n} 本"),
+                Err(e) => format!("切断に失敗: {e}"),
+            };
+            events.lock().unwrap().push((ctx.started.elapsed().as_secs_f64(), msg));
+        }));
+    }
     let mut hs = vec![];
     for a in &project.actors {
         hs.push(tokio::spawn(drive_actor(ctx.clone(), Arc::new(a.clone()))));
@@ -717,11 +882,15 @@ pub async fn execute(
     for h in hs {
         let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
     }
+    for h in chaos_hs {
+        let _ = h.await;
+    }
     let _ = sampler.await;
-    summarize(&ctx, &opts)
+    let evs = events.lock().unwrap().clone();
+    summarize(&ctx, &opts, &evs)
 }
 
-fn summarize(ctx: &Ctx, opts: &RunOpts) -> Summary {
+fn summarize(ctx: &Ctx, opts: &RunOpts, evs: &[(f64, String)]) -> Summary {
     let p = &ctx.project;
     let tot = ctx.metrics.tot.lock().unwrap();
     let secs = opts.secs as f64;
@@ -757,6 +926,7 @@ fn summarize(ctx: &Ctx, opts: &RunOpts) -> Summary {
             "qps": a.count as f64 / secs, "errors": a.errors,
             "avg_rows": if a.count > 0 { a.rows as f64 / a.count as f64 } else { 0.0 },
             "p50_ms": h.map(|h| ms(h, 0.5)).unwrap_or(0.0), "p95_ms": h.map(|h| ms(h, 0.95)).unwrap_or(0.0),
+                "wait_p50_ms": a.wait.as_ref().map(|h| ms(h, 0.5)).unwrap_or(0.0), "wait_p95_ms": a.wait.as_ref().map(|h| ms(h, 0.95)).unwrap_or(0.0),
         }));
     }
     // 計測期間の時系列から平均を出す
@@ -857,6 +1027,58 @@ fn summarize(ctx: &Ctx, opts: &RunOpts) -> Summary {
         "1 秒あたり {total_q:.0} クエリ、{} ループ/秒",
         (loops as f64 / secs) as u64
     ));
+    // ソーク: 計測期間の前半と後半で、遅延・接続・メモリが漂っていないか（30 秒以上の計測で評価）
+    if opts.secs >= 30 && pts.len() >= 12 {
+        let third = pts.len() / 3;
+        let mean_of = |sl: &[&Point], f: &dyn Fn(&Point) -> Option<f64>| -> Option<f64> {
+            let v: Vec<f64> = sl.iter().filter_map(|x| f(x)).collect();
+            if v.is_empty() { None } else { Some(v.iter().sum::<f64>() / v.len() as f64) }
+        };
+        let worst = |x: &Point| -> Option<f64> {
+            let v: Vec<f64> = x.v.iter().filter(|(k, _)| k.starts_with("p95.") && !k.contains("batch")).map(|(_, v)| *v).collect();
+            if v.is_empty() { None } else { Some(v.into_iter().fold(0.0, f64::max)) }
+        };
+        let (first, last) = (&pts[..third], &pts[pts.len() - third..]);
+        let checks: [(&str, Box<dyn Fn(&Point) -> Option<f64>>, f64); 4] = [
+            ("p95", Box::new(worst), 1.25),
+            ("DB の接続数", Box::new(|x: &Point| x.v.get("db.conns").copied()), 1.2),
+            ("負荷側のメモリ", Box::new(|x: &Point| x.v.get("gen.rss_mb").copied()), 1.2),
+            ("DB の CPU", Box::new(|x: &Point| x.v.get("db.cpu_cores").copied()), 1.25),
+        ];
+        let mut any = false;
+        for (name, f, thr) in checks.iter() {
+            if let (Some(a), Some(b)) = (mean_of(first, f.as_ref()), mean_of(last, f.as_ref())) {
+                if a > 0.0 && b / a > *thr {
+                    any = true;
+                    c.messages.push(format!("ドリフト: {name} が計測の前半 {a:.2} → 後半 {b:.2}（{:+.0}%）。長時間で悪化しています（リーク・肥大・キャッシュの冷えを疑う）", (b / a - 1.0) * 100.0));
+                }
+            }
+        }
+        if !any {
+            c.messages.push(format!("ドリフトなし（{} 秒の計測の前半と後半で p95・接続・メモリ・CPU に目立った増加なし）", opts.secs));
+        }
+    }
+    // 障害からの回復時間
+    for (t_e, txt) in evs.iter().filter(|(_, t)| t.starts_with("切断")) {
+        let worst = |x: &Point| x.v.iter().filter(|(k, _)| k.starts_with("p95.") && !k.contains("batch")).map(|(_, v)| *v).fold(0.0f64, f64::max);
+        let errs = |x: &Point| x.v.get("errors").copied().unwrap_or(0.0);
+        let mut base: Vec<f64> = series.iter().filter(|x| x.t >= warm && x.t < *t_e).map(|x| worst(x)).collect();
+        base.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let b = if base.is_empty() { 0.0 } else { base[base.len() / 2] };
+        let thr = (b * 1.5).max(b + 5.0);
+        let after: Vec<&Point> = series.iter().filter(|x| x.t >= *t_e).collect();
+        let mut rec_s = None;
+        for i in 0..after.len() {
+            let ok = after[i..].iter().take(3).all(|x| worst(x) <= thr && errs(x) == 0.0);
+            if ok && after.len() - i >= 3 {
+                rec_s = Some(after[i].t - t_e);
+                break;
+            }
+        }
+        let peak = after.iter().take(30).map(|x| worst(x)).fold(0.0f64, f64::max);
+        let nerr: f64 = after.iter().take(30).map(|x| errs(x)).sum();
+        c.messages.push(format!("障害注入（{txt}、{t_e:.0}秒）: 回復まで {}、p95 最大 {peak:.0}ms（平常 {b:.1}ms）、エラー {nerr:.0} 件{}", match rec_s { Some(s) => format!("{s:.0} 秒"), None => "（計測期間内に回復せず）".into() }, if ctx.project.retry_conn { "。接続エラーは 1 回やり直し済み" } else { "" }));
+    }
     c.verdict = if c.slo_ok {
         format!(
             "合格（p95 {worst_p95:.1}ms ≤ {}ms、エラー率 {:.2}%）",
@@ -918,13 +1140,13 @@ pub async fn calibrate(
                 h.clone(),
             );
             let tenants = project.tenants;
+            let proj = project.clone();
             hs.push(tokio::spawn(async move {
                 while Instant::now() < end {
                     let tenant = rand::thread_rng().gen_range(1..=tenants.max(1));
-                    let sql = resolve(&q.sql, tenant, tenants, &rows, &HashMap::new());
                     let Ok(mut g) = pool.get().await else { break };
                     let t = Instant::now();
-                    match g.conn().exec(&sql).await {
+                    match run_sql(g.conn(), &proj, &q.sql, tenant, &rows, &HashMap::new()).await {
                         Ok(r) => {
                             rec(&mut h.lock().unwrap(), t.elapsed());
                             count.fetch_add(1, Ordering::Relaxed);

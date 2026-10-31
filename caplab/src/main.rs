@@ -1,7 +1,10 @@
 mod cpu;
 mod engine;
 mod estimate;
+mod import;
 mod model;
+mod net;
+mod proxy;
 mod runner;
 mod schema;
 
@@ -49,6 +52,7 @@ struct Run {
     cpu_src: String,
     opts: (u64, u64),
     estimate: serde_json::Value,
+    started_unix: f64,
 }
 
 struct App {
@@ -57,6 +61,8 @@ struct App {
     calib: RwLock<Calib>,
     runs: Mutex<BTreeMap<String, Arc<Run>>>,
     job: Mutex<Job>,
+    /// 掃引・繰り返しの結果
+    results: Mutex<BTreeMap<String, serde_json::Value>>,
 }
 
 fn now_ms() -> u128 {
@@ -117,7 +123,7 @@ fn engine_for(p: &Project) -> Result<Engine, String> {
             return Err(format!("MySQL のデータベース名は 'caplab' で始めてください（既存のデータを壊さないため。現在: '{db}'）"));
         }
     }
-    Ok(Engine::new(p.engine, dsn))
+    Ok(Engine::new(p.engine, dsn).with_tls(p.tls))
 }
 
 fn save(app: &App) {
@@ -177,10 +183,196 @@ async fn get_estimate(
     let mut p = a.project.read().unwrap().clone();
     if let Some(r) = q.rtt {
         p.profile.rtt_ms = r;
+        p.profile.measured_rtt_ms = None;
     }
     let c = a.calib.read().unwrap().clone();
     Json(estimate::estimate(&p, &c, q.tenants.unwrap_or(p.tenants)))
 }
+/// テナント条件の lint（クエリがテナントを跨いで読み書きしないか）
+fn lint_queries(p: &Project) -> Vec<serde_json::Value> {
+    let mut out = vec![];
+    for (n, q) in &p.queries {
+        let s = q.sql.to_ascii_lowercase();
+        let has_tenant = s.contains("tenant_id") || s.contains(":tenant");
+        let upd = s.trim_start().starts_with("update") || s.trim_start().starts_with("delete");
+        if !has_tenant {
+            out.push(serde_json::json!({ "query": n, "level": if q.write { "error" } else { "warn" }, "msg": "テナント条件（tenant_id）がありません。他テナントのデータを読む / 更新する恐れがあります" }));
+        }
+        if upd && !s.contains(" where ") {
+            out.push(serde_json::json!({ "query": n, "level": "error", "msg": "WHERE がない UPDATE / DELETE です（全行が対象になります）" }));
+        }
+        if s.contains("select *") {
+            out.push(serde_json::json!({ "query": n, "level": "info", "msg": "SELECT * です。列を絞ると転送量と CPU が減ります" }));
+        }
+    }
+    out
+}
+async fn lint_h(State(a): State<Arc<App>>) -> Json<Vec<serde_json::Value>> {
+    Json(lint_queries(&a.project.read().unwrap()))
+}
+
+/// クエリごとの EXPLAIN（全件走査の警告）
+async fn explain_h(State(a): State<Arc<App>>) -> Res<Json<Vec<serde_json::Value>>> {
+    let p = a.project.read().unwrap().clone();
+    let eng = engine_for(&p).map_err(bad)?;
+    let mut c = eng.connect().await.map_err(bad)?;
+    let rows = schema::rows_per_tenant(&p);
+    let mut out = vec![];
+    for (n, q) in p.queries.iter().filter(|(_, q)| !q.write) {
+        let (sql, _) = runner::render(&q.sql, 1, p.tenants, &rows, &Default::default(), None);
+        let big: u64 = rows.iter().filter(|(t, _)| q.sql.contains(t.as_str())).map(|(_, r)| r * p.tenants as u64).max().unwrap_or(0);
+        match eng.explain(c.as_mut(), &sql).await {
+            Ok((scans, summary)) => out.push(serde_json::json!({
+                "query": n, "full_scans": scans, "summary": summary, "table_rows": big,
+                "warn": if scans > 0 && big > 2000 { format!("{big} 行の表を全件走査しています。インデックス（特に tenant_id を先頭にした複合）を確認してください") } else if scans > 0 { "全件走査ですが、表が小さいので問題ない可能性があります".to_string() } else { String::new() },
+            })),
+            Err(e) => out.push(serde_json::json!({ "query": n, "error": e.to_string() })),
+        }
+    }
+    Ok(Json(out))
+}
+
+/// データ量と DB のメモリキャッシュの比較
+async fn storage_h(State(a): State<Arc<App>>) -> Res<Json<serde_json::Value>> {
+    let p = a.project.read().unwrap().clone();
+    let eng = engine_for(&p).map_err(bad)?;
+    let mut c = eng.connect().await.map_err(bad)?;
+    let (data, cache) = eng.storage_mb(c.as_mut()).await.map_err(bad)?;
+    Ok(Json(serde_json::json!({ "data_mb": data, "cache_mb": cache, "fits": data <= cache * 0.8,
+        "msg": if data > cache * 0.8 { "データがメモリキャッシュに収まりません。ディスク読み（IOPS）が出て、CPU 以外の限界が先に来る可能性があります" } else { "データはメモリキャッシュに収まっています（測定中はほぼメモリから読みます。本番でデータが増えると変わります）" } })))
+}
+
+#[derive(Deserialize)]
+struct DdlReq {
+    ddl: String,
+    rows: Option<BTreeMap<String, u32>>,
+    apply: Option<bool>,
+}
+async fn import_ddl_h(State(a): State<Arc<App>>, Json(r): Json<DdlReq>) -> Res<Json<serde_json::Value>> {
+    let eng = a.project.read().unwrap().engine;
+    let res = import::import_ddl(eng, &r.ddl, &r.rows.unwrap_or_default()).map_err(bad)?;
+    if r.apply.unwrap_or(false) {
+        let mut p = a.project.read().unwrap().clone();
+        p.schema.tables = res.tables.clone();
+        schema::validate(&p).map_err(bad)?;
+        p.queries = schema::candidates(&p);
+        p.actors.clear();
+        *a.project.write().unwrap() = p;
+        save(&a);
+    }
+    Ok(Json(serde_json::json!({ "tables": res.tables, "warnings": res.warnings, "applied": r.apply.unwrap_or(false) })))
+}
+
+#[derive(Deserialize)]
+struct QImportReq {
+    /// "text"（貼り付け）| "db"（pg_stat_statements / performance_schema）
+    source: String,
+    text: Option<String>,
+    /// 統計の集計期間（秒）。回数 ÷ 期間 = 頻度
+    window_secs: Option<f64>,
+    top: Option<usize>,
+    apply: Option<bool>,
+}
+async fn import_queries_h(State(a): State<Arc<App>>, Json(r): Json<QImportReq>) -> Res<Json<serde_json::Value>> {
+    let p = a.project.read().unwrap().clone();
+    let top = r.top.unwrap_or(20).clamp(1, 100);
+    let mut window = r.window_secs.unwrap_or(0.0);
+    let mut items: Vec<import::Imported> = if r.source == "text" {
+        import::from_text(r.text.as_deref().unwrap_or(""))
+    } else {
+        let eng = engine_for(&p).map_err(bad)?;
+        let mut c = eng.connect().await.map_err(bad)?;
+        let sql = match p.engine {
+            EngineKind::Postgres => format!("select query, calls from pg_stat_statements where dbid=(select oid from pg_database where datname=current_database()) order by calls desc limit {}", top * 3),
+            EngineKind::Mysql => format!("select DIGEST_TEXT, COUNT_STAR from performance_schema.events_statements_summary_by_digest where DIGEST_TEXT is not null and SCHEMA_NAME = database() order by COUNT_STAR desc limit {}", top * 3),
+        };
+        if window <= 0.0 {
+            // 統計の累積期間（MySQL: 稼働時間 / PostgreSQL: 統計のリセットからの経過）を既定にする
+            let q = match p.engine {
+                EngineKind::Postgres => "select extract(epoch from now() - stats_reset)::float8 from pg_stat_statements_info",
+                EngineKind::Mysql => "select variable_value from performance_schema.global_status where variable_name='Uptime'",
+            };
+            window = c.rows(q).await.ok().and_then(|r| r.first().and_then(|x| x[0].parse::<f64>().ok())).unwrap_or(3600.0);
+        }
+        let rows = c.rows(&sql).await.map_err(|e| bad(format!("統計ビューを読めません: {e}（PostgreSQL は shared_preload_libraries に pg_stat_statements を入れて CREATE EXTENSION が必要。MySQL は performance_schema の有効化が必要）")))?;
+        let text: String = rows.iter().map(|r| format!("-- calls={}\n{};\n", r[1], r[0].replace('`', ""))).collect();
+        import::from_text(&text)
+    };
+    items.retain(|i| {
+        let l = i.sql.to_ascii_lowercase();
+        (l.starts_with("select") || l.starts_with("update") || l.starts_with("insert") || l.starts_with("delete"))
+            && !l.contains("pg_stat") && !l.contains("pg_total_relation_size") && !l.contains("pg_size_bytes") && !l.contains("current_setting") && !l.contains("pg_terminate") && !l.contains("performance_schema") && !l.contains("information_schema") && !l.contains("pg_catalog") && !l.contains("pg_settings")
+    });
+    items.truncate(top);
+    if window <= 0.0 {
+        window = 3600.0;
+    }
+    if r.apply.unwrap_or(false) {
+        let mut p = a.project.read().unwrap().clone();
+        import::apply_imported(&mut p, &items, window);
+        *a.project.write().unwrap() = p;
+        save(&a);
+    }
+    Ok(Json(serde_json::json!({ "items": items, "window_secs": window, "applied": r.apply.unwrap_or(false),
+        "note": "取り込んだクエリの値は 1〜1000 の乱数に置き換えます。表名は取り込み元のまま（このアプリのスキーマに同名の表が無いと実行できません）。書き込みは allow_writes を有効にしたときだけ実行します" })))
+}
+
+#[derive(Deserialize)]
+struct MetricsImport {
+    /// 例 "db.cpu_pct"（0〜100 の CPU 使用率）/ "db.cpu_util"（0〜1）/ 任意の名前（ext.<名前> として時系列に載る）
+    name: String,
+    /// `時刻,値` の行。時刻は実行開始からの秒 または UNIX 秒（CloudWatch / Datadog のエクスポートを貼れる）
+    csv: String,
+}
+async fn import_metrics_h(State(a): State<Arc<App>>, Path(id): Path<String>, Json(r): Json<MetricsImport>) -> Res<Json<serde_json::Value>> {
+    let run = a.runs.lock().unwrap().get(&id).cloned().ok_or((StatusCode::NOT_FOUND, "実行が見つかりません（このセッションで実行したものだけ取り込めます）".to_string()))?;
+    let pts = import::parse_csv(&r.csv, run.started_unix).map_err(bad)?;
+    let vcpu = run.project.profile.vcpu;
+    let (warm, secs) = (run.opts.1 as f64, run.opts.0 as f64);
+    let mut series = run.metrics.series.lock().unwrap();
+    let mut n = 0;
+    for (t, v) in &pts {
+        // いちばん近い 1 秒の点に載せる（1.5 秒以内）
+        if let Some(pt) = series.iter_mut().min_by(|x, y| (x.t - t).abs().partial_cmp(&(y.t - t).abs()).unwrap()) {
+            if (pt.t - t).abs() <= 1.5 {
+                pt.v.insert(format!("ext.{}", r.name), *v);
+                if r.name == "db.cpu_pct" || r.name == "db.cpu_util" {
+                    let util = if r.name == "db.cpu_pct" { v / 100.0 } else { *v };
+                    pt.v.insert("db.cpu_util".into(), util);
+                    pt.v.insert("db.cpu_cores".into(), util * vcpu);
+                }
+                n += 1;
+            }
+        }
+    }
+    // CPU を取り込んだときは、結論の CPU・安全上限を計算し直す
+    if r.name == "db.cpu_pct" || r.name == "db.cpu_util" {
+        let w: Vec<f64> = series.iter().filter(|x| x.t >= warm && x.t <= warm + secs).filter_map(|x| x.v.get("db.cpu_util").copied()).collect();
+        if !w.is_empty() {
+            let util = w.iter().sum::<f64>() / w.len() as f64;
+            let cores = util * vcpu;
+            if let Some(s) = run.summary.lock().unwrap().as_mut() {
+                let pr = &run.project.profile;
+                s.conclusion.cpu_util = Some(util);
+                s.conclusion.cpu_cores_avg = Some(cores);
+                let per_tenant = cores / run.project.tenants.max(1) as f64;
+                if per_tenant > 0.0 {
+                    s.conclusion.safe_tenants_extrapolated = Some(((pr.vcpu * pr.safe_util - pr.reserve_vcpu) / per_tenant).max(0.0));
+                }
+                s.conclusion.messages.push(format!("外部メトリクス（{}）から CPU 使用率 {:.0}% を取り込みました（{n} 点）", r.name, util * 100.0));
+                if s.conclusion.bottleneck.starts_with("不明") {
+                    s.conclusion.bottleneck = if util > 0.88 { "CPU（崩壊域）".into() } else if util > pr.safe_util { "CPU（安全枠超過）".into() } else { "余裕あり".into() };
+                }
+            }
+        }
+    }
+    drop(series);
+    if *run.state.lock().unwrap() == "finished" {
+        let _ = std::fs::write(a.dir.join("runs").join(format!("{}.json", run.id)), serde_json::to_vec(&run_json(&run, true)).unwrap());
+    }
+    Ok(Json(serde_json::json!({ "attached_points": n, "name": r.name })))
+}
+
 async fn get_calib(State(a): State<Arc<App>>) -> Json<Calib> {
     Json(a.calib.read().unwrap().clone())
 }
@@ -237,6 +429,8 @@ async fn doctor(State(a): State<Arc<App>>) -> Json<Vec<Check>> {
                         ),
                     );
                 }
+                let enc = eng.tls_in_use(c.as_mut()).await.unwrap_or(false);
+                add("接続の暗号化", enc || p.tls == TlsMode::Off, format!("{}{}", if enc { "TLS で暗号化されています" } else { "暗号化していません" }, if !enc && !is_local(&eng.dsn) { "。リモートの DB（RDS / Aurora など）に平文で繋いでいます。設定の「接続の暗号化」を有効にしてください" } else { "" }));
                 let src = cpu::CpuSrc::detect(is_local(&eng.dsn));
                 let v1 = src.read();
                 add(
@@ -358,8 +552,8 @@ struct RunReq {
     warmup: Option<u64>,
 }
 
-async fn start_run(app: &Arc<App>, secs: u64, warmup: u64) -> Result<String, String> {
-    let p = app.project.read().unwrap().clone();
+async fn start_run(app: &Arc<App>, secs: u64, warmup: u64, over: Option<Project>) -> Result<String, String> {
+    let p = over.unwrap_or_else(|| app.project.read().unwrap().clone());
     if p.actors.is_empty() {
         return Err("アクターがありません。「ざっくり設定」でワークロードを作ってください".into());
     }
@@ -368,6 +562,30 @@ async fn start_run(app: &Arc<App>, secs: u64, warmup: u64) -> Result<String, Str
     let settings = eng.settings(conn.as_mut()).await.unwrap_or_default();
     let src = cpu::CpuSrc::detect(is_local(&eng.dsn));
     let mut notes = vec![];
+    if let Ok((data, cache)) = eng.storage_mb(conn.as_mut()).await {
+        if data > cache * 0.8 {
+            notes.push(format!("データ {data:.0} MB が DB のメモリキャッシュ {cache:.0} MB に収まりません。ディスク読みが出て、CPU 以外が先に詰まる可能性があります"));
+        }
+    }
+    // ネットワーク遅延の演出（中間サーバ）
+    let mut sim: Option<net::NetSim> = None;
+    let eng = if p.profile.net_mode == NetMode::Proxy && p.profile.rtt_ms > 0.0 {
+        let (h, port) = net::host_port(p.engine, &eng.direct);
+        let s = net::NetSim::start(format!("{h}:{port}"), p.profile.rtt_ms / 2.0, p.profile.jitter_ms).await.map_err(|e| e.to_string())?;
+        let e2 = eng.with_dsn(net::rewrite_dsn(p.engine, &eng.direct, s.addr));
+        match net::probe(&e2, 60).await {
+            Ok(pr) => {
+                let want = p.profile.rtt_ms;
+                let off = (pr.rtt_p50_ms - want).abs() > (0.6f64).max(want * 0.3);
+                notes.push(format!("遅延の演出（中間サーバ）: 設定 RTT {want:.2}ms / 計測 p50 {:.2}ms（接続確立 {:.1}ms）{}", pr.rtt_p50_ms, pr.connect_ms, if off { "。設定と計測が離れています（演出が不正確）" } else { "" }));
+            }
+            Err(e) => notes.push(format!("遅延の演出の確認に失敗: {e}")),
+        }
+        sim = Some(s);
+        e2
+    } else {
+        eng
+    };
     if p.actors.iter().any(|a| {
         a.steps
             .iter()
@@ -390,6 +608,14 @@ async fn start_run(app: &Arc<App>, secs: u64, warmup: u64) -> Result<String, Str
             notes.push("書き込みを含む負荷ですが、DB の耐久性設定が緩い（fsync / synchronous_commit / innodb_flush_log_at_trx_commit）ため、書き込みは実環境より速く出ます".into());
         }
     }
+    // Reader（Aurora のリーダーエンドポイントなど）
+    let reader = if !p.reader_dsn.is_empty() {
+        let mut rp = p.clone();
+        rp.dsn = p.reader_dsn.clone();
+        Some(engine_for(&rp)?)
+    } else {
+        None
+    };
     let id = format!("r{}", now_ms());
     let run = Arc::new(Run {
         id: id.clone(),
@@ -403,6 +629,7 @@ async fn start_run(app: &Arc<App>, secs: u64, warmup: u64) -> Result<String, Str
         notes: Mutex::new(notes),
         cpu_src: src.name(),
         opts: (secs, warmup),
+        started_unix: now_ms() as f64 / 1000.0,
         estimate: serde_json::to_value(estimate::estimate(
             &p,
             &app.calib.read().unwrap(),
@@ -413,9 +640,11 @@ async fn start_run(app: &Arc<App>, secs: u64, warmup: u64) -> Result<String, Str
     app.runs.lock().unwrap().insert(id.clone(), run.clone());
     let app2 = app.clone();
     tokio::spawn(async move {
+        let _sim = sim; // 実行が終わるまで中間サーバを生かしておく
         let s = runner::execute(
             p,
             eng,
+            reader,
             src,
             RunOpts {
                 secs,
@@ -445,6 +674,7 @@ async fn post_run(
         &a,
         r.secs.unwrap_or(30).clamp(3, 7200),
         r.warmup.unwrap_or(5),
+        None,
     )
     .await
     .map_err(bad)?;
@@ -489,7 +719,7 @@ async fn easy(State(a): State<Arc<App>>, Json(r): Json<RunReq>) -> Res<Json<Job>
             j.step = "3/3 負荷実行".into();
             j.progress = 0.6;
         });
-        match start_run(&app, secs, warm).await {
+        match start_run(&app, secs, warm, None).await {
             Err(e) => set_job(&app, |j| {
                 j.running = false;
                 j.error = Some(e);
@@ -528,6 +758,161 @@ async fn easy(State(a): State<Arc<App>>, Json(r): Json<RunReq>) -> Res<Json<Job>
 
 async fn get_job(State(a): State<Arc<App>>) -> Json<Job> {
     Json(a.job.lock().unwrap().clone())
+}
+
+/// 実行が終わるまで待って、要約を返す
+async fn wait_run(app: &Arc<App>, id: &str) -> Option<(Summary, Project)> {
+    let run = app.runs.lock().unwrap().get(id).cloned()?;
+    while *run.state.lock().unwrap() == "running" {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    let s = run.summary.lock().unwrap().clone()?;
+    Some((s, run.project.clone()))
+}
+
+fn worst_p95(s: &Summary, p: &Project) -> f64 {
+    s.actors.iter().filter(|a| p.actors.iter().find(|x| x.name == a.name).map(|x| x.kind != Kind::Batch).unwrap_or(true)).map(|a| a.p95_ms).fold(0.0, f64::max)
+}
+
+fn save_result(app: &App, id: &str, v: &serde_json::Value) {
+    let _ = std::fs::create_dir_all(app.dir.join("results"));
+    let _ = std::fs::write(app.dir.join("results").join(format!("{id}.json")), serde_json::to_vec(v).unwrap());
+    app.results.lock().unwrap().insert(id.to_string(), v.clone());
+}
+
+#[derive(Deserialize)]
+struct SweepReq {
+    tenants: Vec<u32>,
+    secs: Option<u64>,
+    warmup: Option<u64>,
+}
+
+/// テナント数の掃引: データを最大数ぶん用意して、小さい順に実行し、限界（膝）を探す
+async fn sweep_h(State(a): State<Arc<App>>, Json(r): Json<SweepReq>) -> Res<Json<Job>> {
+    if job_busy(&a) {
+        return Err(bad("別のジョブが実行中です"));
+    }
+    let mut ns = r.tenants.clone();
+    ns.sort();
+    ns.dedup();
+    if ns.is_empty() || ns.len() > 30 {
+        return Err(bad("テナント数は 1〜30 個の値で指定してください"));
+    }
+    let base = a.project.read().unwrap().clone();
+    if base.actors.is_empty() {
+        return Err(bad("先にワークロードを作ってください"));
+    }
+    let eng = engine_for(&base).map_err(bad)?;
+    let (secs, warm) = (r.secs.unwrap_or(15).clamp(3, 600), r.warmup.unwrap_or(4));
+    set_job(&a, |j| *j = Job { name: "テナント数の掃引".into(), step: "データ投入".into(), running: true, ..Default::default() });
+    let app = a.clone();
+    tokio::spawn(async move {
+        let mut full = base.clone();
+        full.tenants = *ns.last().unwrap();
+        let app2 = app.clone();
+        if let Err(e) = schema::apply_and_populate(&eng, &full, move |x| set_job(&app2, |j| j.progress = x * 0.3)).await {
+            return set_job(&app, |j| { j.running = false; j.error = Some(e.to_string()); });
+        }
+        let id = format!("sweep{}", now_ms());
+        let mut points = vec![];
+        for (i, n) in ns.iter().enumerate() {
+            set_job(&app, |j| { j.step = format!("{n} テナントを実行（{}/{}）", i + 1, ns.len()); j.progress = 0.3 + 0.7 * i as f64 / ns.len() as f64; });
+            let mut p = base.clone();
+            p.tenants = *n;
+            p.chaos.clear(); // 掃引は限界を探る実行なので、障害注入は入れない
+            let rid = match start_run(&app, secs, warm, Some(p)).await {
+                Ok(x) => x,
+                Err(e) => return set_job(&app, |j| { j.running = false; j.error = Some(e); }),
+            };
+            let Some((s, pr)) = wait_run(&app, &rid).await else { continue };
+            let c = &s.conclusion;
+            points.push(serde_json::json!({
+                "tenants": n, "run_id": rid, "util": c.cpu_util, "cpu_cores": c.cpu_cores_avg,
+                "worst_p95_ms": worst_p95(&s, &pr), "qps": s.queries.values().map(|v| v["qps"].as_f64().unwrap_or(0.0)).sum::<f64>(),
+                "errors": s.actors.iter().map(|x| x.errors).sum::<u64>(), "dropped": s.actors.iter().map(|x| x.dropped).sum::<u64>(),
+                "bottleneck": c.bottleneck, "slo_ok": c.slo_ok, "pool_wait_max": c.pool_wait_max,
+            }));
+        }
+        // 負荷側が詰まった点は測定として信用できないので、膝・安全上限の判定から除く（その点以降は「負荷側の限界」として別に示す）
+        let safe_util = base.profile.safe_util;
+        let invalid = |p: &serde_json::Value| p["bottleneck"].as_str().map(|b| b.starts_with("負荷")).unwrap_or(false);
+        let bad_pt = |p: &serde_json::Value| !p["slo_ok"].as_bool().unwrap_or(false) || p["util"].as_f64().map(|u| u > 0.88).unwrap_or(false);
+        let generator_limit = points.iter().find(|p| invalid(p)).and_then(|p| p["tenants"].as_u64());
+        let valid: Vec<&serde_json::Value> = points.iter().filter(|p| !invalid(p)).collect();
+        let knee = valid.iter().find(|p| bad_pt(p)).and_then(|p| p["tenants"].as_u64());
+        let safe = valid.iter().take_while(|p| !bad_pt(p)).filter(|p| p["util"].as_f64().map(|u| u <= safe_util).unwrap_or(true)).filter_map(|p| p["tenants"].as_u64()).last();
+        let res = serde_json::json!({ "id": id, "kind": "sweep", "points": points, "knee": knee, "generator_limit": generator_limit, "safe_tenants": safe, "safe_util": safe_util, "secs": secs });
+        save_result(&app, &id, &res);
+        set_job(&app, |j| { j.running = false; j.step = "完了".into(); j.progress = 1.0; });
+    });
+    Ok(Json(a.job.lock().unwrap().clone()))
+}
+
+#[derive(Deserialize)]
+struct RepeatReq {
+    n: u32,
+    secs: Option<u64>,
+    warmup: Option<u64>,
+}
+
+/// N 回繰り返して、平均とばらつきを出す（1 回だけの測定を信用しないため）
+async fn repeat_h(State(a): State<Arc<App>>, Json(r): Json<RepeatReq>) -> Res<Json<Job>> {
+    if job_busy(&a) {
+        return Err(bad("別のジョブが実行中です"));
+    }
+    let n = r.n.clamp(2, 20);
+    let p = a.project.read().unwrap().clone();
+    if p.actors.is_empty() {
+        return Err(bad("先にワークロードを作ってください"));
+    }
+    engine_for(&p).map_err(bad)?;
+    let (secs, warm) = (r.secs.unwrap_or(15).clamp(3, 600), r.warmup.unwrap_or(4));
+    set_job(&a, |j| *j = Job { name: format!("{n} 回の繰り返し"), step: "開始".into(), running: true, ..Default::default() });
+    let app = a.clone();
+    tokio::spawn(async move {
+        let id = format!("repeat{}", now_ms());
+        let mut runs = vec![];
+        let mut series: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+        for i in 0..n {
+            set_job(&app, |j| { j.step = format!("{}/{} 回目", i + 1, n); j.progress = i as f64 / n as f64; });
+            let rid = match start_run(&app, secs, warm, None).await {
+                Ok(x) => x,
+                Err(e) => return set_job(&app, |j| { j.running = false; j.error = Some(e); }),
+            };
+            let Some((s, pr)) = wait_run(&app, &rid).await else { continue };
+            let c = &s.conclusion;
+            series.entry("worst_p95_ms").or_default().push(worst_p95(&s, &pr));
+            if let Some(x) = c.cpu_cores_avg { series.entry("cpu_cores").or_default().push(x); }
+            series.entry("qps").or_default().push(s.queries.values().map(|v| v["qps"].as_f64().unwrap_or(0.0)).sum());
+            series.entry("errors").or_default().push(s.actors.iter().map(|x| x.errors).sum::<u64>() as f64);
+            runs.push(rid);
+        }
+        let mut stats = serde_json::Map::new();
+        for (k, v) in &series {
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            let sd = if v.len() > 1 { (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt() } else { 0.0 };
+            stats.insert(k.to_string(), serde_json::json!({ "mean": mean, "stdev": sd, "cv_pct": if mean > 0.0 { sd / mean * 100.0 } else { 0.0 }, "min": v.iter().cloned().fold(f64::MAX, f64::min), "max": v.iter().cloned().fold(0.0, f64::max), "values": v }));
+        }
+        let res = serde_json::json!({ "id": id, "kind": "repeat", "n": n, "runs": runs, "stats": stats, "secs": secs });
+        save_result(&app, &id, &res);
+        set_job(&app, |j| { j.running = false; j.step = "完了".into(); j.progress = 1.0; });
+    });
+    Ok(Json(a.job.lock().unwrap().clone()))
+}
+
+async fn list_results(State(a): State<Arc<App>>) -> Json<Vec<serde_json::Value>> {
+    let mut out: Vec<serde_json::Value> = a.results.lock().unwrap().values().cloned().collect();
+    if let Ok(rd) = std::fs::read_dir(a.dir.join("results")) {
+        for e in rd.flatten() {
+            if let Ok(v) = std::fs::read(e.path()).map_err(|_| ()).and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).map_err(|_| ())) {
+                if !out.iter().any(|x| x["id"] == v["id"]) { out.push(v); }
+            }
+        }
+    }
+    // id は `sweep<ms>` / `repeat<ms>`。種類ではなく時刻（数字部分）の新しい順に並べる
+    let ts = |v: &serde_json::Value| v["id"].as_str().unwrap_or("").trim_start_matches(|c: char| c.is_ascii_alphabetic()).parse::<u128>().unwrap_or(0);
+    out.sort_by(|a, b| ts(b).cmp(&ts(a)));
+    Json(out)
 }
 
 fn run_json(r: &Run, with_series: bool) -> serde_json::Value {
@@ -615,6 +1000,33 @@ async fn stream_run(
     Ok(Sse::new(first.chain(live)).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
+#[derive(Deserialize)]
+struct ProbeReq {
+    n: Option<usize>,
+    gap_ms: Option<u64>,
+}
+async fn probe_h(State(a): State<Arc<App>>, Json(r): Json<ProbeReq>) -> Res<Json<serde_json::Value>> {
+    let p = a.project.read().unwrap().clone();
+    let eng = engine_for(&p).map_err(bad)?;
+    let n = r.n.unwrap_or(100).clamp(10, 2000);
+    let direct = net::probe_gap(&eng, n, r.gap_ms.unwrap_or(0)).await.map_err(bad)?;
+    let mut out = serde_json::json!({ "direct": direct });
+    if p.profile.rtt_ms > 0.0 {
+        let (h, port) = net::host_port(p.engine, &eng.direct);
+        let s = net::NetSim::start(format!("{h}:{port}"), p.profile.rtt_ms / 2.0, p.profile.jitter_ms).await.map_err(bad)?;
+        let sim = net::probe(&eng.with_dsn(net::rewrite_dsn(p.engine, &eng.direct, s.addr)), n).await.map_err(bad)?;
+        out["simulated"] = serde_json::json!({ "configured_rtt_ms": p.profile.rtt_ms, "measured": sim });
+    }
+    Ok(Json(out))
+}
+/// 実測した RTT をプロジェクトに保存する（試算に使う）
+async fn probe_save(State(a): State<Arc<App>>, Json(v): Json<serde_json::Value>) -> Res<Json<Project>> {
+    let rtt = v["rtt_ms"].as_f64().ok_or_else(|| bad("rtt_ms がありません"))?;
+    a.project.write().unwrap().profile.measured_rtt_ms = if rtt > 0.0 { Some(rtt) } else { None };
+    save(&a);
+    Ok(Json(a.project.read().unwrap().clone()))
+}
+
 fn default_project() -> Project {
     let t = |n: &str, par: Option<&str>, cols, size, rows| TableSpec {
         name: n.into(),
@@ -641,6 +1053,11 @@ fn default_project() -> Project {
 
 #[tokio::main]
 async fn main() {
+    // TLS の暗号プロバイダを明示する（mysql_async と tokio-postgres-rustls が別々に rustls を使うため、自動選択に任せるとパニックする）
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    if std::env::args().nth(1).as_deref() == Some("probe") {
+        return probe_cli().await;
+    }
     let dir = PathBuf::from(std::env::var("CAPLAB_DIR").unwrap_or_else(|_| "caplab-data".into()));
     let project = std::fs::read(dir.join("project.json"))
         .ok()
@@ -656,6 +1073,7 @@ async fn main() {
         calib: RwLock::new(calib),
         runs: Mutex::new(BTreeMap::new()),
         job: Mutex::new(Job::default()),
+        results: Mutex::new(BTreeMap::new()),
     });
     let router = Router::new()
         .route("/", get(index))
@@ -666,6 +1084,17 @@ async fn main() {
         .route("/api/estimate", get(get_estimate))
         .route("/api/calib", get(get_calib))
         .route("/api/doctor", get(doctor))
+        .route("/api/import/ddl", post(import_ddl_h))
+        .route("/api/import/queries", post(import_queries_h))
+        .route("/api/runs/:id/import_metrics", post(import_metrics_h))
+        .route("/api/lint", get(lint_h))
+        .route("/api/explain", get(explain_h))
+        .route("/api/storage", get(storage_h))
+        .route("/api/sweep", post(sweep_h))
+        .route("/api/repeat", post(repeat_h))
+        .route("/api/results", get(list_results))
+        .route("/api/probe", post(probe_h))
+        .route("/api/probe/save", post(probe_save))
         .route("/api/schema/apply", post(schema_apply))
         .route("/api/calibrate", post(calibrate_h))
         .route("/api/easy", post(easy))
@@ -679,4 +1108,29 @@ async fn main() {
     println!("caplab: http://{addr}");
     let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(l, router).await.unwrap();
+}
+
+/// `caplab probe [--save]`: ECS のコンテナ内などで実行し、接続確立の時間と SELECT 1 の往復を測る
+async fn probe_cli() {
+    let dir = PathBuf::from(std::env::var("CAPLAB_DIR").unwrap_or_else(|_| "caplab-data".into()));
+    let mut p: Project = std::fs::read(dir.join("project.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(default_project);
+    if let Ok(e) = std::env::var("CAPLAB_ENGINE") {
+        p.engine = if e == "mysql" { EngineKind::Mysql } else { EngineKind::Postgres };
+    }
+    let eng = match engine_for(&p) {
+        Ok(e) => e,
+        Err(e) => return eprintln!("{e}"),
+    };
+    match net::probe(&eng, 500).await {
+        Ok(r) => {
+            println!("接続確立 p50 {:.2} ms ／ SELECT 1 の往復 p50 {:.3} ms, p95 {:.3} ms, min {:.3} ms（{} 回）", r.connect_ms, r.rtt_p50_ms, r.rtt_p95_ms, r.rtt_min_ms, r.samples);
+            if std::env::args().any(|a| a == "--save") {
+                p.profile.measured_rtt_ms = Some(r.rtt_p50_ms);
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(dir.join("project.json"), serde_json::to_vec_pretty(&p).unwrap());
+                println!("プロジェクトの measured_rtt_ms に保存しました");
+            }
+        }
+        Err(e) => eprintln!("probe 失敗: {e}"),
+    }
 }

@@ -94,3 +94,9 @@ pub fn self_cpu() -> f64 {
         0.0
     }
 }
+
+/// このプロセスの常駐メモリ（MB）
+pub fn self_rss_mb() -> f64 {
+    let Ok(s) = fs::read_to_string("/proc/self/status") else { return 0.0 };
+    s.lines().find_map(|l| l.strip_prefix("VmRSS:")).and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse::<f64>().ok()).map(|kb| kb / 1024.0).unwrap_or(0.0)
+}
