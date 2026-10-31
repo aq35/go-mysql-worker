@@ -6,6 +6,7 @@
 /fphash
 /web
 /*lab
+!/caplab/
 # 実験の一時ファイル
 *.test
 *.out

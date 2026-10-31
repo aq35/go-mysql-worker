@@ -1,5 +1,8 @@
 # 容量実験 Web アプリ（caplab）設計
 
+> **実装状況**: [caplab/](../caplab)（Rust）に最初の版がある。PostgreSQL での通し（投入 → 校正 → 実行 → 結論 → 画面）は検証済み。
+> MySQL・書き込み負荷・プリペアド・DDL 取り込み・障害時の挙動などは未実装 / 未検証。一覧は [caplab/README.md](../caplab/README.md)。
+
 テーブル定義・クエリ・頻度を登録すると、**MySQL の CPU 負担と接続数を試算**し、同じ定義で**実際に負荷をかけて測り、試算と突き合わせる**アプリ。
 きっかけは [tenant-cpu-isolation](tenant-cpu-isolation.md)（EXP-65）。あそこで手作業だった「ワーカー・Web・認証を混ぜた上限の見積り」をアプリにする。
 
