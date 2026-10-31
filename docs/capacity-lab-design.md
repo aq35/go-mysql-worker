@@ -63,6 +63,13 @@
 - **試作では短い遅延（約 2ms 以下）を再現できなかった**（1 往復あたり約 2ms 余計に乗る）。設定した RTT と計測した RTT を並べて、ずれたら警告する。
 - 遅延は DB の CPU をほとんど使わず、**1 ループの時間と接続の占有時間を伸ばす**（N+1 の 12 クエリは RTT の 12 倍）。接続数の試算に反映する。
 
+### RTT が分からないとき（`caplab probe`）
+
+- **`caplab probe --target <dsn>`**: 対象に接続して、接続確立の時間と、1 接続で `SELECT 1` を N 回実行した往復の p50 / p95 を測り、結果を `profiles` の `network` に保存する。
+  ECS のコンテナ内（ECS Exec など）で実行すれば、アプリ → Proxy → Aurora の実際の往復が取れる。Proxy 経由と Aurora 直結の両方で測れば、差が Proxy の追加分。
+- 実測値が無い間は、**RTT を 1 つに決めず、複数の値（例 0.3 / 1 / 2 / 5 ms）で並べて試算**し、結論が変わる境目を示す。仮置きの値には常に「仮置き」を表示する。
+- ping は Proxy / Aurora のセキュリティグループで通らないことが多いため、SQL の往復で測る。
+
 ## 目的と、やらないこと
 
 | やる | やらない |
@@ -444,7 +451,7 @@ GET      /api/runs, /api/runs/{id}       履歴・結果
 
 | 段階 | 内容 | 検証できること |
 | --- | --- | --- |
-| M0 | Rust の雛形（Cargo ワークスペース、axum、設定、CI）+ **MySQL スパイク**: 接続、`SHOW GLOBAL STATUS`、`performance_schema` の `CPU_TIME` の有無、cgroup の CPU 採取を 1 本の小さなバイナリで確認する | 未確認の MySQL 周りの前提を最初に潰す |
+| M0 | Rust の雛形（`caplab probe` を含む）（Cargo ワークスペース、axum、設定、CI）+ **MySQL スパイク**: 接続、`SHOW GLOBAL STATUS`、`performance_schema` の `CPU_TIME` の有無、cgroup の CPU 採取を 1 本の小さなバイナリで確認する | 未確認の MySQL 周りの前提を最初に潰す |
 | M1 | `model`（`profiles` を含む）+ `estimate`（DB なし）+ 試算 API + 画面 3・4 | 手入力した校正値から試算が出る。EXP-65 の再現。vCPU の切り替えで結果が変わる |
 | M2 | `schema` + データ生成 + `calib` + 画面 1・2 | クエリの CPU/回の校正表 |
 | M3 | `runner`（steady）+ `cpusrc(cgroup)` + `dbstat` | 試算と実測の突き合わせ（画面 5・6） |
