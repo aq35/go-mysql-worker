@@ -119,12 +119,18 @@
      "stagger": true, "pool": {"max_open": 4, "max_idle": 4},
      "steps": [{"query": "poll_devices"}, {"query": "poll_devices"}, ...]},   // 直列 6 回なら 6 行
     {"kind": "web", "name": "api-list", "rate": {"per": "tenant", "qps": 1.2},
-     "pool": {"max_open": 20}, "steps": [{"query": "auth_session"}, {"query": "list_devices"}]}
+     "pool": {"max_open": 20}, "steps": [{"query": "auth_session"}, {"query": "list_devices"}]},   // 1 リクエスト = 1 ループ分のクエリ
+    {"kind": "batch", "name": "monthly-report", "schedule": {"every": "60s", "concurrency": 2},
+     "scope": "tenant_range", "tenants": [1, 50],        // 重いバッチ: 複数テナント分をまとめて集計など
+     "pool": {"max_open": 2}, "steps": [{"query": "report_agg"}]}
   ]
 }
 ```
 
 - **ステップは順序つきの配列**。「1 秒に直列 6 回」は 6 要素（同じクエリを繰り返してもよい。`{"query": "x", "repeat": 6}` の省略記法も許す）。
+- **Batch（重いバッチ）**は、`schedule`（`every` の定期実行 / `once` の 1 回きり / `continuous` の流しっぱなし）と `concurrency`（同時に何本流すか）を持つ。
+  対象は `tenant`（1 テナント分）か `tenant_range`（複数テナント分をまとめて）。通常のワーカー・Web と**同じ DB で同時に動かして影響を見る**（実験: 50 テナント分の集計を流すと全体の p95 が 3.3 → 12.9ms）。
+  バッチだけを別プロファイル（別 DB / レプリカ）に向ける設定も持てる（隔離した場合の比較）。
 - **Worker**は `every`（間隔）× `per`（`tenant` ごと / `global`）で頻度を決める。`instances`（同じワーカーを何本動かすか）も持つ。
 - **Web** は `rate`（`per: tenant | user`、`qps`）。`per: user` のときは `users_per_tenant` を掛ける。API ごとに 1 アクターを登録する。
 - 認証クエリは、ふつうのクエリとして Web アクターのステップの先頭に置く（キャッシュ率は `cache_hit` で表す。例: `{"query":"auth","cache_hit":0.98}`）。
